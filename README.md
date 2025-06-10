@@ -1,45 +1,45 @@
-# Sistema de Presença - Reuniões
+# Attendance System - Meetings
 
-Um sistema moderno para gerenciamento de presença em reuniões corporativas, construído com Next.js, Clerk, e Prisma.
+A modern system for managing attendance in corporate meetings, built with Next.js, Clerk, and Prisma.
 
-## 🚀 Funcionalidades
+## 🚀 Features
 
-- **Autenticação e Autorização**
-  - Login seguro com Clerk
-  - Suporte a múltiplas organizações
-  - Gerenciamento de permissões por organização
+- **Authentication & Authorization**
+  - Secure login with Clerk
+  - Multi-organization support
+  - Organization-based permission management
 
-- **Gestão de Reuniões**
-  - Criação e agendamento de reuniões
-  - Registro de presença em tempo real
-  - Histórico de reuniões por organização
-  - Relatórios de participação
+- **Meeting Management**
+  - Create and schedule meetings
+  - Real-time attendance tracking
+  - Organization-specific meeting history
+  - Participation reports
 
-- **Interface Moderna**
-  - Design responsivo com Tailwind CSS
-  - Componentes interativos
-  - Feedback visual em tempo real
-  - Suporte a temas claro/escuro
+- **Modern Interface**
+  - Responsive design with Tailwind CSS
+  - Interactive components
+  - Real-time visual feedback
+  - Light/dark theme support
 
-- **Segurança**
-  - Middleware de rate limiting
-  - Headers de segurança
-  - Proteção contra ataques comuns
-  - Validação de dados
+- **Security**
+  - Rate limiting middleware
+  - Security headers
+  - Protection against common attacks
+  - Data validation
 
-## 🛠️ Tecnologias
+## 🛠️ Technologies
 
 - **Frontend**
   - Next.js 14 (App Router)
   - React 18
   - Tailwind CSS
-  - Clerk (Autenticação)
+  - Clerk (Authentication)
 
 - **Backend**
   - Next.js API Routes
   - Prisma (ORM)
   - PostgreSQL
-  - WebSocket (Tempo real)
+  - WebSocket (Real-time)
 
 - **DevOps**
   - TypeScript
@@ -47,32 +47,32 @@ Um sistema moderno para gerenciamento de presença em reuniões corporativas, co
   - Prettier
   - Husky (Git Hooks)
 
-## 📋 Pré-requisitos
+## 📋 Prerequisites
 
 - Node.js 18+
 - PostgreSQL
-- Conta no Clerk
-- Conta no Zoom (opcional)
+- Clerk Account
+- Zoom Account (optional)
 
-## 🔧 Instalação
+## 🔧 Installation
 
-1. Clone o repositório:
+1. Clone the repository:
 ```bash
-git clone https://github.com/seu-usuario/chamadas.git
+git clone https://github.com/your-username/chamadas.git
 cd chamadas
 ```
 
-2. Instale as dependências:
+2. Install dependencies:
 ```bash
 npm install
 ```
 
-3. Configure as variáveis de ambiente:
+3. Set up environment variables:
 ```bash
 cp .env.example .env
 ```
 
-4. Configure as seguintes variáveis no arquivo `.env`:
+4. Configure the following variables in `.env`:
 ```env
 # Clerk
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
@@ -81,69 +81,69 @@ CLERK_SECRET_KEY=
 # Database
 DATABASE_URL=
 
-# Zoom (opcional)
+# Zoom (optional)
 ZOOM_API_KEY=
 ZOOM_API_SECRET=
 ```
 
-5. Execute as migrações do banco de dados:
+5. Run database migrations:
 ```bash
 npx prisma migrate dev
 ```
 
-6. Inicie o servidor de desenvolvimento:
+6. Start the development server:
 ```bash
 npm run dev
 ```
 
-## 🏗️ Estrutura do Projeto
+## 🏗️ Project Structure
 
 ```
 src/
-├── app/                    # Rotas da aplicação (App Router)
-│   ├── [orgId]/           # Rotas específicas por organização
-│   │   └── dashboard/     # Dashboard principal
+├── app/                    # Application routes (App Router)
+│   ├── [orgId]/           # Organization-specific routes
+│   │   └── dashboard/     # Main dashboard
 │   ├── api/               # API Routes
-│   └── select-org/        # Página de seleção de organização
-├── components/            # Componentes React reutilizáveis
-├── lib/                   # Utilitários e configurações
-│   ├── prisma.ts         # Cliente Prisma
-│   ├── zoom.ts           # Integração com Zoom
-│   └── socket.ts         # Configuração WebSocket
-└── middleware.ts         # Middleware global
+│   └── select-org/        # Organization selection page
+├── components/            # Reusable React components
+├── lib/                   # Utilities and configurations
+│   ├── prisma.ts         # Prisma client
+│   ├── zoom.ts           # Zoom integration
+│   └── socket.ts         # WebSocket configuration
+└── middleware.ts         # Global middleware
 ```
 
-## 🔐 Segurança
+## 🔐 Security
 
-O projeto implementa várias camadas de segurança:
+The project implements multiple security layers:
 
-- Rate limiting para prevenir abusos
-- Headers de segurança (HSTS, CSP, etc.)
-- Validação de dados em todas as entradas
-- Proteção contra CSRF e XSS
-- Autenticação baseada em JWT
-- Sanitização de inputs
+- Rate limiting to prevent abuse
+- Security headers (HSTS, CSP, etc.)
+- Input data validation
+- CSRF and XSS protection
+- JWT-based authentication
+- Input sanitization
 
 ## 📈 Performance
 
-- Caching de respostas da API
-- Otimização de imagens
-- Lazy loading de componentes
-- Compressão de assets
-- Indexação do banco de dados
+- API response caching
+- Image optimization
+- Component lazy loading
+- Asset compression
+- Database indexing
 
-## 🤝 Contribuindo
+## 🤝 Contributing
 
-1. Fork o projeto
-2. Crie sua branch de feature (`git checkout -b feature/AmazingFeature`)
-3. Commit suas mudanças (`git commit -m 'Add some AmazingFeature'`)
-4. Push para a branch (`git push origin feature/AmazingFeature`)
-5. Abra um Pull Request
+1. Fork the project
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-## 📝 Licença
+## 📝 License
 
-Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 📞 Suporte
+## 📞 Support
 
-Para suporte, envie um email para seu-email@exemplo.com ou abra uma issue no GitHub.
+For support, email your-email@example.com or open an issue on GitHub.
