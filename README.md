@@ -1,36 +1,149 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Sistema de Presença - Reuniões
 
-## Getting Started
+Um sistema moderno para gerenciamento de presença em reuniões corporativas, construído com Next.js, Clerk, e Prisma.
 
-First, run the development server:
+## 🚀 Funcionalidades
 
+- **Autenticação e Autorização**
+  - Login seguro com Clerk
+  - Suporte a múltiplas organizações
+  - Gerenciamento de permissões por organização
+
+- **Gestão de Reuniões**
+  - Criação e agendamento de reuniões
+  - Registro de presença em tempo real
+  - Histórico de reuniões por organização
+  - Relatórios de participação
+
+- **Interface Moderna**
+  - Design responsivo com Tailwind CSS
+  - Componentes interativos
+  - Feedback visual em tempo real
+  - Suporte a temas claro/escuro
+
+- **Segurança**
+  - Middleware de rate limiting
+  - Headers de segurança
+  - Proteção contra ataques comuns
+  - Validação de dados
+
+## 🛠️ Tecnologias
+
+- **Frontend**
+  - Next.js 14 (App Router)
+  - React 18
+  - Tailwind CSS
+  - Clerk (Autenticação)
+
+- **Backend**
+  - Next.js API Routes
+  - Prisma (ORM)
+  - PostgreSQL
+  - WebSocket (Tempo real)
+
+- **DevOps**
+  - TypeScript
+  - ESLint
+  - Prettier
+  - Husky (Git Hooks)
+
+## 📋 Pré-requisitos
+
+- Node.js 18+
+- PostgreSQL
+- Conta no Clerk
+- Conta no Zoom (opcional)
+
+## 🔧 Instalação
+
+1. Clone o repositório:
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone https://github.com/seu-usuario/chamadas.git
+cd chamadas
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Instale as dependências:
+```bash
+npm install
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+3. Configure as variáveis de ambiente:
+```bash
+cp .env.example .env
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+4. Configure as seguintes variáveis no arquivo `.env`:
+```env
+# Clerk
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=
 
-## Learn More
+# Database
+DATABASE_URL=
 
-To learn more about Next.js, take a look at the following resources:
+# Zoom (opcional)
+ZOOM_API_KEY=
+ZOOM_API_SECRET=
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+5. Execute as migrações do banco de dados:
+```bash
+npx prisma migrate dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+6. Inicie o servidor de desenvolvimento:
+```bash
+npm run dev
+```
 
-## Deploy on Vercel
+## 🏗️ Estrutura do Projeto
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+src/
+├── app/                    # Rotas da aplicação (App Router)
+│   ├── [orgId]/           # Rotas específicas por organização
+│   │   └── dashboard/     # Dashboard principal
+│   ├── api/               # API Routes
+│   └── select-org/        # Página de seleção de organização
+├── components/            # Componentes React reutilizáveis
+├── lib/                   # Utilitários e configurações
+│   ├── prisma.ts         # Cliente Prisma
+│   ├── zoom.ts           # Integração com Zoom
+│   └── socket.ts         # Configuração WebSocket
+└── middleware.ts         # Middleware global
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 🔐 Segurança
+
+O projeto implementa várias camadas de segurança:
+
+- Rate limiting para prevenir abusos
+- Headers de segurança (HSTS, CSP, etc.)
+- Validação de dados em todas as entradas
+- Proteção contra CSRF e XSS
+- Autenticação baseada em JWT
+- Sanitização de inputs
+
+## 📈 Performance
+
+- Caching de respostas da API
+- Otimização de imagens
+- Lazy loading de componentes
+- Compressão de assets
+- Indexação do banco de dados
+
+## 🤝 Contribuindo
+
+1. Fork o projeto
+2. Crie sua branch de feature (`git checkout -b feature/AmazingFeature`)
+3. Commit suas mudanças (`git commit -m 'Add some AmazingFeature'`)
+4. Push para a branch (`git push origin feature/AmazingFeature`)
+5. Abra um Pull Request
+
+## 📝 Licença
+
+Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
+
+## 📞 Suporte
+
+Para suporte, envie um email para seu-email@exemplo.com ou abra uma issue no GitHub.
