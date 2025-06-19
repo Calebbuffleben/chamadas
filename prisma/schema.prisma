@@ -6,6 +6,7 @@
 
 generator client {
   provider = "prisma-client-js"
+  output   = "../generated/prisma"
 }
 
 datasource db {
@@ -13,94 +14,84 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id            String       @id @default(cuid())
-  name          String?
-  email         String?      @unique
-  department    String
-  microsoftAccessToken String?
-  microsoftRefreshToken String?
-  microsoftTokenExpiresAt DateTime?
-  zoomAccessToken String?
-  zoomRefreshToken String?
-  zoomTokenExpiresAt DateTime?
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  createdMeetings ExternalMeeting[] @relation("MeetingCreator")
-  attendances   Attendance[]
-
-  @@index([organizationId])
-  @@index([email])
-  @@index([microsoftTokenExpiresAt])
-  @@index([zoomTokenExpiresAt])
-}
-
-model ExternalMeeting {
-  id             String       @id @default(cuid())
-  externalId     String
-  topic          String
-  startAt        DateTime
-  endAt          DateTime
-  platform       Platform
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  createdById    String
-  createdBy      User         @relation("MeetingCreator", fields: [createdById], references: [id])
-  attendances    Attendance[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@unique([externalId, platform])
-  @@index([organizationId])
-  @@index([createdById])
-  @@index([startAt])
-  @@index([endAt])
-  @@index([platform])
-  @@index([organizationId, startAt])
-  @@index([organizationId, platform])
-}
-
 model Organization {
-  id            String           @id @default(cuid())
-  name          String
-  users         User[]
-  externalMeetings ExternalMeeting[]
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  @@index([name])
+  // Relationships
+  users User[]
+
+  @@map("organizations")
 }
 
-model Attendance {
-  id                String         @id @default(cuid())
-  userId            String
-  meetingId         String
-  joinedAt          DateTime
-  leftAt            DateTime?
-  wasActive         Boolean        @default(true)
-  disconnects       Int            @default(0)
-  totalEngagementTime Int          @default(0)
-  timeInMeeting     Int            @default(0)
-  engagementScore   Float          @default(0)
-  user              User           @relation(fields: [userId], references: [id])
-  meeting           ExternalMeeting @relation(fields: [meetingId], references: [id])
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  name        String
+  azureId     String?  @unique
+  organizationId String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  @@unique([userId, meetingId])
-  @@index([userId])
-  @@index([meetingId])
-  @@index([joinedAt])
-  @@index([leftAt])
-  @@index([wasActive])
-  @@index([engagementScore])
-  @@index([userId, joinedAt])
-  @@index([meetingId, joinedAt])
+  // Relationships
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  presenceSessions PresenceSession[]
+
+  @@map("users")
 }
 
-enum Platform {
+model Meeting {
+  id          String   @id @default(cuid())
+  title       String
+  startTime   DateTime
+  endTime     DateTime
+  platform    MeetingPlatform
+  externalId  String?  // External ID from the platform (Zoom meeting ID, Teams meeting ID, etc.)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relationships
+  presenceSessions PresenceSession[]
+
+  @@map("meetings")
+}
+
+model PresenceSession {
+  id          String   @id @default(cuid())
+  userId      String
+  meetingId   String
+  joinedAt    DateTime
+  leftAt      DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relationships
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  focusIntervals FocusInterval[]
+
+  @@map("presence_sessions")
+}
+
+model FocusInterval {
+  id                String   @id @default(cuid())
+  presenceSessionId String
+  startedAt         DateTime
+  endedAt           DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relationships
+  presenceSession PresenceSession @relation(fields: [presenceSessionId], references: [id], onDelete: Cascade)
+
+  @@map("focus_intervals")
+}
+
+enum MeetingPlatform {
   ZOOM
   TEAMS
+  SLACK
 }
