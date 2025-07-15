@@ -1,0 +1,80 @@
+{
+    "nodes": [
+      {
+        "parameters": {
+          "path": "teams/presence",
+          "httpMethod": "POST",
+          "responseMode": "onReceived",
+          "options": {}
+        },
+        "id": "WebhookTrigger",
+        "name": "Microsoft Teams Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [200, 300]
+      },
+      {
+        "parameters": {
+          "keepOnlySet": true,
+          "fields": [
+            {
+              "name": "email",
+              "value": "={{$json.body.user.email}}"
+            },
+            {
+              "name": "meetingId",
+              "value": "={{$json.body.meeting.id}}"
+            },
+            {
+              "name": "joinedAt",
+              "value": "={{$json.body.joined_at}}"
+            }
+          ]
+        },
+        "id": "SetNode",
+        "name": "Extrair Dados",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 1,
+        "position": [400, 300]
+      },
+      {
+        "parameters": {
+          "requestMethod": "POST",
+          "url": "https://sua-api.interna.local/api/presence-sessions/start",
+          "jsonParameters": true,
+          "options": {},
+          "bodyParametersJson": "={\n  \"email\": \"{{$json.email}}\",\n  \"meetingId\": \"{{$json.meetingId}}\",\n  \"joinedAt\": \"{{$json.joinedAt}}\"\n}"
+        },
+        "id": "HttpRequestNode",
+        "name": "Registrar Sessão na API",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 1,
+        "position": [600, 300]
+      }
+    ],
+    "connections": {
+      "Microsoft Teams Webhook": {
+        "main": [
+          [
+            {
+              "node": "Extrair Dados",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extrair Dados": {
+        "main": [
+          [
+            {
+              "node": "Registrar Sessão na API",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  }
+  
