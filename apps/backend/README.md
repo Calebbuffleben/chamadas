@@ -13,12 +13,31 @@ Backend construído com Nest.js, Prisma e Socket.io para comunicação em tempo 
 
 ```
 src/
-├── config/          # Módulo de configuração
-├── prisma/          # Serviço e módulo do Prisma
-├── websocket/       # Gateway e módulo do Socket.io
-├── app.module.ts    # Módulo principal
-├── app.controller.ts # Controller principal
-└── main.ts          # Ponto de entrada da aplicação
+├── app.controller.ts          # Controller REST principal
+├── app.module.ts              # Módulo raiz
+├── config/                    # Módulo de configuração
+├── egress/
+│   └── media-egress.server.ts # Servidor WS para egress de áudio/vídeo (track egress)
+├── livekit/
+│   ├── livekit-egress.service.ts     # Faz start automático do Track Egress via API
+│   ├── livekit-webhook.controller.ts # Webhook que reage aos eventos do LiveKit
+│   └── livekit-webhook.module.ts
+├── pipeline/
+│   ├── audio-pipeline.module.ts      # Wiring DI da pipeline
+│   ├── audio-pipeline.service.ts     # Bufferiza e agrupa áudio, gera WAV
+│   └── hume-stream.service.ts        # Integração em tempo real com Hume (WS)
+├── prisma/
+│   ├── prisma.module.ts
+│   └── prisma.service.ts
+├── sessions/
+│   ├── sessions.module.ts
+│   └── sessions.service.ts           # Persistência de sessões (room SID)
+├── types/
+│   └── ws-stub.d.ts
+├── websocket/
+│   ├── websocket.gateway.ts          # Socket.io (chat/demo)
+│   └── websocket.module.ts
+└── main.ts
 ```
 
 ## Instalação
@@ -60,6 +79,10 @@ pnpm prisma:generate
 # Criar e aplicar as migrações
 pnpm prisma:migrate
 ```
+
+## Configuração sensível
+
+O backend depende de um arquivo `.env` com credenciais de banco, LiveKit e integrações externas. Use `apps/backend/env.example` como referência e preencha os valores adequados para o seu ambiente (produção, staging, desenvolvimento).
 
 ## Executando a aplicação
 
@@ -160,12 +183,12 @@ Este backend expõe endpoints WebSocket para receber Egress de Áudio e Vídeo d
 
 1. **Recepção**: WebSocket recebe chunks PCM (s16le) em tempo real
 2. **Buffer**: Pipeline interna agrupa chunks em memória (padrão: 2 segundos)
-3. **Flush**: Quando atinge threshold (tempo ou tamanho), bloqueia é enviado
-4. **Processamento**: Normalização de volume opcional
-5. **Formato**: Conversão opcional para WAV (com header)
-6. **Saída dupla**:
-   - **Arquivos WAV**: Salvos em `EGRESS_AUDIO_OUTPUT_DIR/<meetingId>/`
-   - **Imentiv API**: HTTP POST para `IMENTIV_ENDPOINT_URL` (se configurado)
+3. **Flush**: Quando atinge threshold (tempo ou tamanho), o bloco é disparado
+4. **Processamento**: Normalização de volume opcional antes do envio
+5. **Formato**: Geração de header WAV (PCM s16le) para o bloco agregado
+6. **Streaming + Arquivo**:
+   - **Streaming**: o chunk é enviado via WebSocket para o Hume (prosódia) quando as credenciais estão configuradas
+   - **Arquivo**: o mesmo chunk é persistido no diretório de saída de áudio (`<meetingId>/`)
 
 **Logs de pipeline:**
 - Arquivos de log em `storage/pipeline-logs/<meetingId>.log`
@@ -173,21 +196,7 @@ Este backend expõe endpoints WebSocket para receber Egress de Áudio e Vídeo d
 
 ### Variáveis de ambiente (mídia e pipeline)
 
-```env
-# Diretórios de saída
-EGRESS_AUDIO_OUTPUT_DIR=./storage/egress/audio
-EGRESS_VIDEO_OUTPUT_DIR=./storage/egress/video
-
-# Pipeline de áudio
-AUDIO_PIPELINE_GROUP_SECONDS=2          # Tempo de agrupamento (segundos)
-AUDIO_PIPELINE_PAYLOAD=pcm              # Formato: pcm | wav
-AUDIO_PIPELINE_NORMALIZE=false          # Normalizar volume: true | false
-AUDIO_PIPELINE_TIMEOUT_MS=5000          # Timeout HTTP (ms)
-
-# Integração Imentiv
-IMENTIV_ENDPOINT_URL=                   # URL do endpoint HTTP (ex: http://api.imentiv.com/ingest)
-IMENTIV_API_KEY=                        # Token Bearer (opcional)
-```
+> Consulte o arquivo `.env` para configurar diretórios de saída, janela de agrupamento da pipeline e credenciais de streaming em tempo real.
 
 ### Como iniciar o Track Egress (exemplo)
 
@@ -196,11 +205,7 @@ Do lado do servidor LiveKit (ou de um serviço seu), inicie um Track Egress com 
 ```ts
 import { EgressClient } from 'livekit-server-sdk';
 
-const egress = new EgressClient(
-  'https://<SEU_LIVEKIT_HOST>',
-  process.env.LIVEKIT_API_KEY!,
-  process.env.LIVEKIT_API_SECRET!
-);
+const egress = new EgressClient('https://<livekit-host>', '<api-key>', '<api-secret>');
 
 await egress.startTrackEgress({
   roomName: 'my-room',
@@ -216,27 +221,20 @@ await egress.startTrackEgress({
 - O `groupSeconds` permite override do tempo de agrupamento por chamada
 - Este endpoint é apenas para desenvolvimento; adicione autenticação/assinatura de URL antes de expor publicamente
 
-### Integração Imentiv
+### Integração Hume
 
-Quando `IMENTIV_ENDPOINT_URL` está configurado, o pipeline automaticamente envia blocos de áudio agregados:
+Com as credenciais do Hume configuradas o backend abre, por participante/track, um WebSocket dedicado para o endpoint do serviço e envia os blocos agregados em tempo real.
 
-**Requisição HTTP:**
-- Método: `POST`
-- URL: `{IMENTIV_ENDPOINT_URL}?meetingId={id}&participant={id}&track={id}&sr={rate}&ch={channels}`
-- Headers:
-  - `Content-Type`: `audio/L16; rate={rate}; channels={channels}` (PCM) ou `audio/wav` (WAV)
-  - `X-Meeting-Id`: ID da reunião
-  - `X-Participant-Id`: Identidade do participante
-  - `X-Track-Id`: ID do track
-  - `Authorization`: `Bearer {IMENTIV_API_KEY}` (se fornecido)
-- Body: Bloco de áudio agregado (PCM ou WAV)
-- Retry: 3 tentativas com backoff exponencial
-- Timeout: Configurável via `AUDIO_PIPELINE_TIMEOUT_MS`
+**Fluxo resumido:**
+- Adiciona o header `X-Hume-Api-Key` (quando definido).
+- Após o `open`, envia uma mensagem de configuração mínima (`{ models: { prosody: {} } }`).
+- Cada flush vira um frame WAV em base64 enviado para o Hume.
+- Mensagens recebidas do Hume são logadas para inspeção.
+- Quedas de conexão limpam o cache e forçam reabertura automática na próxima remessa de áudio.
 
-**Se `IMENTIV_ENDPOINT_URL` não estiver configurado:**
-- O pipeline continua funcionando normalmente
-- Apenas grava os arquivos WAV
-- Loga um aviso no console
+**Sem chave do Hume:**
+- A pipeline continua gerando arquivos `.wav` e logs locais.
+- O console registra que o envio externo foi ignorado.
 
 ### Vídeo Egress (bytestream codificado)
 
@@ -250,7 +248,7 @@ Quando `IMENTIV_ENDPOINT_URL` está configurado, o pipeline automaticamente envi
 - `meetingId` (opcional) - ID da reunião (resolvido automaticamente se não fornecido)
 
 **Saída:**
-- Arquivos `.h264` ou `.ivf` em `EGRESS_VIDEO_OUTPUT_DIR/<meetingId>/`
+- Arquivos `.h264` ou `.ivf` armazenados no diretório de vídeo configurado (`<meetingId>/`)
 - Estrutura de diretórios organizada por `meetingId`
 
 > **Observação:** O servidor grava o bytestream codificado sem empacotamento (sem MP4/WebM). Para playback, use ferramentas de linha de comando (ex.: ffmpeg) para empacotar.
@@ -335,7 +333,7 @@ storage/
 ## Próximos passos
 
 - [x] Pipeline de áudio interna com buffer
-- [x] Integração com Imentiv (HTTP dispatch)
+- [x] Integração com Hume (streaming WebSocket)
 - [x] Gerenciamento de sessões via webhook
 - [x] Associação automática de streams com sessões
 - [ ] Adicionar autenticação (JWT) para endpoints

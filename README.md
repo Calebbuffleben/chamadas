@@ -13,63 +13,58 @@ This is a monorepo containing three main applications:
 ## Architecture
 
 ```
-┌─────────────────┐
-│  Next.js Client │ (apps/meet)
-│  Port: 3000     │
-└────────┬────────┘
-         │
-         │ HTTP/WebSocket
-         │
-    ┌────┴──────────────────────────┐
-    │                               │
-┌───▼──────────┐          ┌─────────▼────────┐
-│ LiveKit      │          │ NestJS Backend   │
-│ Server       │◄─────────┤ Port: 3001       │
-│ Port: 7880   │ WebSocket│                  │
-│              │          │                  │
-│  Track Egress│─────────►│  Egress WS       │
-│  (Audio/Video)│         │  Receivers       │
-└──────────────┘          └─────────┬────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-         ┌──────────▼──────┐  ┌─────▼──────┐  ┌────▼──────┐
-         │  PostgreSQL     │  │  Audio     │  │  Imentiv  │
-         │  Port: 5432     │  │  Pipeline  │  │  HTTP API │
-         │  (Sessions)     │  │  (Buffer)  │  │           │
-         └─────────────────┘  └────────────┘  └───────────┘
+                                   ┌──────────────────────────────┐
+                                   │  Media Egress WS             │
+                                   │  + Audio Pipeline            │
+                                   │  (apps/backend)              │
+                                   └──────────┬──────────┬────────┘
+                                              │          │
+                                  Track Egress│          │ Prosody WS
+                                  (WebSocket) ▼          ▼
+┌────────────────────┐   HTTP/REST   ┌────────▼──────────┐   REST (admin API)   ┌──────────────────────┐
+│ Next.js Client     │◄──────────────│ NestJS Backend    │────────────────────►│ LiveKit Server        │
+│ (apps/meet)        │──────────────►│ (apps/backend)    │◄────────────────────┤ (apps/livekit)        │
+└─────────┬──────────┘   Socket.io   │ - Token issuance  │   Webhooks (HTTP)    └─────────┬────────────┘
+          │ WebRTC                   │ - Session store   │                         WebRTC │
+          │                          │ - Egress control  │                           rooms │
+          ▼                          │ - Pipeline/Hume   │                                ▼
+┌──────────────────┐                 └───────────────────┘                      ┌──────────────────┐
+│ Participants     │                                                         │ Participants     │
+└──────────────────┘                                                         └──────────────────┘
+                                              │
+                                              ▼
+                                   ┌──────────────────────┐
+                                   │ Hume Prosody API     │
+                                   └──────────────────────┘
 ```
+
+**Fluxos principais:**
+- O frontend consome REST/Socket.io do backend para tokens, sessões e eventos auxiliares.
+- O backend aciona o LiveKit via REST (egress, gravação) e recebe webhooks que sinalizam mudanças de sala/tracks.
+- O LiveKit envia áudio/vídeo via Track Egress WebSocket para o backend, que processa, armazena e (quando habilitado) encaminha chunks ao Hume.
+- O cliente WebRTC fala diretamente com o LiveKit para mídia em tempo real, enquanto o backend observa e enriquece a reunião com processamento de áudio e persistência.
 
 ### Audio Processing Flow
 
 ```
 LiveKit Track Egress (PCM s16le)
          │
-         │ WebSocket
-         ▼
-┌────────────────────┐
-│  Egress Receiver   │
-│  (/egress-audio)   │
+         ▼ WebSocket (/egress-audio)
+┌──────────────────────────────┐
+│  Media Egress WS (backend)   │
+│  Receiver                    │
 └─────────┬──────────┘
           │
-          │ Chunks (real-time)
-          ▼
-┌────────────────────┐
-│  Audio Pipeline    │
-│  - Buffer (1-2s)   │
-│  - Group chunks    │
-│  - Normalize (opt) │
-└─────────┬──────────┘
-          │
-          │ Aggregated blocks
-          ├──────────────────┐
-          │                  │
-          ▼                  ▼
-┌─────────────────┐  ┌──────────────┐
-│  WAV Files      │  │  Imentiv API │
-│  (Storage)      │  │  (HTTP POST) │
-└─────────────────┘  └──────────────┘
+          ├─ Writes WAV chunks to storage
+          └─ Enqueues buffer into AudioPipelineService (backend)
+                       │
+                       ├─ Group chunks (default 2 s)
+                       ├─ Optional normalization
+                       ├─ Append pipeline log entry
+                       └─ Stream base64 WAV frame to Hume WS API
 ```
+
+Todo o fluxo de recepção, buffering, armazenamento e streaming em tempo real é executado dentro do NestJS backend. O LiveKit apenas inicia o Track Egress; a manipulação dos chunks, logs e integrações ocorre nos módulos `egress/` e `pipeline/` da API.
 
 ## Components
 
@@ -87,7 +82,8 @@ LiveKit Track Egress (PCM s16le)
 - WebSocket gateway for real-time communication (rooms, messages)
 - **Audio/Video Egress Receivers** - Native WebSocket endpoints that receive PCM audio and encoded video streams from LiveKit
 - **Audio Pipeline** - Internal buffering system that groups audio chunks (1-2s) before processing
-- **Imentiv Integration** - HTTP dispatch of processed audio blocks to external AI service
+- **LiveKit Egress Automation** - Track publish webhook triggers audio track egress with retry logic
+- **Hume Streaming Integration** - Real-time prosody analysis via Hume's WebSocket API
 - **Session Management** - Automatic session tracking via LiveKit webhooks
 - Prisma database integration with Session and User models
 - CORS enabled for cross-origin requests
@@ -132,23 +128,21 @@ The backend provides a comprehensive audio processing pipeline:
 2. **Audio Pipeline** (Internal Buffer):
    - Buffers incoming audio chunks in memory
    - Groups chunks by time (default: 2 seconds) or size threshold
-   - Optional volume normalization
+   - Optional volume normalization before streaming
    - Automatic flush when threshold is reached or connection closes
 
-3. **Imentiv Integration**:
-   - HTTP POST dispatch of aggregated audio blocks
-   - Supports PCM or WAV format
-   - Configurable retry logic (3 attempts with backoff)
-   - Headers: `X-Meeting-Id`, `X-Participant-Id`, `X-Track-Id`
-   - Query params: `meetingId`, `participant`, `track`, `sr`, `ch`
+3. **Hume Streaming Bridge**:
+   - Maintains a dedicated WebSocket connection per meeting/participant/track
+   - Sends base64 WAV frames to Hume's real-time prosody API
+   - Sends a minimal prosody model configuration upon connection
 
-4. **Output Storage**:
-   - WAV files stored in `EGRESS_AUDIO_OUTPUT_DIR/<meetingId>/`
-   - Pipeline logs in `storage/pipeline-logs/<meetingId>.log`
+4. **Output Storage & Logs**:
+   - WAV files stored no diretório configurado para saída de áudio (`<meetingId>/`)
+   - Pipeline logs em `storage/pipeline-logs/<meetingId>.log`
 
 **Video Egress:**
 - WebSocket endpoint (`/egress-video`) receives encoded video streams (H.264/VP8/VP9)
-- Stores raw encoded bytestreams (`.h264` or `.ivf`) in `EGRESS_VIDEO_OUTPUT_DIR/<meetingId>/`
+- Stores raw encoded bytestreams (`.h264` or `.ivf`) in um diretório de vídeo configurado (`<meetingId>/`)
 - Supports query parameters: `roomName`, `participant`, `trackId`, `codec`, `meetingId`
 
 **Session Management:**
@@ -249,7 +243,7 @@ lib/
 - HTTP/WebSocket port: 7880
 - TCP fallback port: 7881
 - UDP media ports: 50000-50100
-- API keys for token generation (development: `devkey` / `devsecret12345678901234567890`)
+- API keys for token generation (definidos no arquivo de configuração do LiveKit)
 
 **Features:**
 - WebRTC media server for real-time communication
@@ -346,57 +340,13 @@ pnpm dev
 
 ## Configuration
 
-### Backend Environment Variables
+### Backend Configuration
 
-```env
-# Database
-DATABASE_URL="postgresql://user:password@localhost:5432/live_meeting?schema=public"
+O backend utiliza um arquivo `.env` com credenciais e caminhos sensíveis (consulte `apps/backend/env.example`). Ajuste-o conforme o ambiente antes de iniciar os serviços.
 
-# Server
-PORT=3001
+### Frontend Configuration
 
-# Media Egress Receivers
-# Directories to store media egress outputs
-EGRESS_AUDIO_OUTPUT_DIR=./storage/egress/audio
-EGRESS_VIDEO_OUTPUT_DIR=./storage/egress/video
-
-# Audio Pipeline / Imentiv
-# Grouping in seconds (default 2)
-AUDIO_PIPELINE_GROUP_SECONDS=2
-# Payload format: pcm | wav
-AUDIO_PIPELINE_PAYLOAD=pcm
-# Normalize volume before sending (true|false)
-AUDIO_PIPELINE_NORMALIZE=false
-# HTTP timeout for dispatch (ms)
-AUDIO_PIPELINE_TIMEOUT_MS=5000
-# Imentiv HTTP ingest endpoint
-IMENTIV_ENDPOINT_URL=
-# Optional bearer token
-IMENTIV_API_KEY=
-
-# Node Environment
-NODE_ENV=development
-```
-
-### Frontend Environment Variables
-
-```env
-# LiveKit Server
-LIVEKIT_URL=ws://localhost:7880
-
-# API Credentials (must match LiveKit server)
-LIVEKIT_API_KEY=devkey
-LIVEKIT_API_SECRET=devsecret12345678901234567890
-
-# API Endpoint
-NEXT_PUBLIC_CONN_DETAILS_ENDPOINT=/api/connection-details
-
-# Token TTL
-LIVEKIT_TOKEN_TTL=10m
-
-# Features
-NEXT_PUBLIC_ENABLE_TEST_PANELS=true
-```
+O frontend também depende de um arquivo `.env.local`. Utilize `apps/meet/env.local.example` como ponto de partida e preencha os valores necessários antes de iniciar o servidor Next.js.
 
 ### LiveKit Server Configuration
 
@@ -534,7 +484,7 @@ Starts recording a room (composite egress).
 - `500` - Server error
 
 **Requirements:**
-- S3 configuration for storage (S3_KEY_ID, S3_KEY_SECRET, S3_BUCKET, S3_ENDPOINT, S3_REGION)
+- S3 storage configuration (bucket, credentials, endpoint e região)
 
 #### GET /api/record/stop
 Stops active recording for a room.
@@ -582,13 +532,14 @@ Stops active recording for a room.
 
 **Processing:**
 - Audio chunks are buffered in memory (default: 2 seconds)
-- Aggregated blocks are flushed to pipeline
-- Dual output: WAV files + HTTP dispatch to Imentiv (if configured)
+- Aggregated blocks are flushed to the audio pipeline
+- Each flush writes WAV data to disk and, quando configurado, encaminha o chunk para o serviço de análise em tempo real
 
 **Output:**
-- WAV files stored in `EGRESS_AUDIO_OUTPUT_DIR/<meetingId>/`
+- WAV files stored in the configured audio output directory (`<meetingId>/`)
 - File naming: `<timestamp>_<room>_<participant>_<track>.wav`
 - Pipeline logs: `storage/pipeline-logs/<meetingId>.log`
+- Real-time prosody frames streamed to the configured analysis endpoint when enabled
 
 #### Video Egress WebSocket
 **Endpoint:** `ws://localhost:3001/egress-video`
@@ -604,7 +555,7 @@ Stops active recording for a room.
 - Binary frames: Encoded video bytestream (H.264 or VP8/VP9)
 
 **Output:**
-- Raw encoded files stored in `EGRESS_VIDEO_OUTPUT_DIR/<meetingId>/`
+- Raw encoded files stored in the configured video output directory (`<meetingId>/`)
 - File extensions: `.h264` (H.264) or `.ivf` (VP8/VP9)
 - File naming: `<timestamp>_<room>_<participant>_<track>.<codec>`
 
@@ -617,11 +568,7 @@ The backend provides a complete audio processing pipeline with buffering and AI 
 ```typescript
 import { EgressClient } from 'livekit-server-sdk';
 
-const egress = new EgressClient(
-  'https://your-livekit-host',
-  process.env.LIVEKIT_API_KEY!,
-  process.env.LIVEKIT_API_SECRET!
-);
+const egress = new EgressClient('https://your-livekit-host', '<api-key>', '<api-secret>');
 
 await egress.startTrackEgress({
   roomName: 'my-room',
@@ -635,11 +582,11 @@ await egress.startTrackEgress({
 1. **Egress Reception**: WebSocket receives PCM audio chunks (s16le) in real-time
 2. **Buffering**: Audio Pipeline buffers chunks in memory (default: 2 seconds)
 3. **Grouping**: When threshold is reached (time or size), aggregated block is flushed
-4. **Processing**: Optional volume normalization if `AUDIO_PIPELINE_NORMALIZE=true`
-5. **Format Conversion**: Optional WAV packaging if `AUDIO_PIPELINE_PAYLOAD=wav`
-6. **Dual Output**:
-   - **WAV Files**: Saved to `EGRESS_AUDIO_OUTPUT_DIR/<meetingId>/<filename>.wav`
-   - **Imentiv API**: HTTP POST to `IMENTIV_ENDPOINT_URL` with aggregated block
+4. **Processing**: Optional volume normalization when enabled
+5. **Format Conversion**: Aggregated PCM is packaged as WAV before dispatch
+6. **Dispatch**:
+   - Streams a base64 WAV frame to the real-time prosody API when credentials are present
+   - Appends a pipeline log entry and writes/updates the local WAV file on disk
 7. **Cleanup**: Buffer is cleared after dispatch
 
 ### Query Parameters
@@ -652,22 +599,20 @@ await egress.startTrackEgress({
 - `meetingId` (optional) - Meeting identifier (auto-resolved from active session if not provided)
 - `groupSeconds` (optional) - Override default grouping time (seconds)
 
-### Imentiv Integration
+### Hume Integration
 
-When `IMENTIV_ENDPOINT_URL` is configured, the pipeline automatically dispatches audio blocks:
+When the real-time analysis credentials are present, each active audio track opens a dedicated WebSocket connection to the analysis service:
 
-**HTTP Request:**
-- Method: `POST`
-- URL: `{IMENTIV_ENDPOINT_URL}?meetingId={id}&participant={id}&track={id}&sr={rate}&ch={channels}`
-- Headers:
-  - `Content-Type`: `audio/L16; rate={rate}; channels={channels}` (PCM) or `audio/wav` (WAV)
-  - `X-Meeting-Id`: Meeting identifier
-  - `X-Participant-Id`: Participant identity
-  - `X-Track-Id`: Track identifier
-  - `Authorization`: `Bearer {IMENTIV_API_KEY}` (if provided)
-- Body: Aggregated audio block (PCM or WAV)
-- Retry: 3 attempts with exponential backoff
-- Timeout: Configurable via `AUDIO_PIPELINE_TIMEOUT_MS`
+**WebSocket Flow:**
+- Sends the required authentication header (if provided)
+- Pushes an initial configuration message enabling the `prosody` model
+- Streams base64-encoded WAV frames generated by the audio pipeline
+- Logs every flush locally (`storage/pipeline-logs/<meetingId>.log`) for troubleshooting
+- Automatically recreates the WS client on connection drop or error
+
+**Without analysis credentials:**
+- The pipeline still buffers audio and writes WAV files locally
+- Log entries note that streaming is skipped because the API key is missing
 
 ### Session Association
 
@@ -749,17 +694,17 @@ The backend includes a `docker-compose.yml` for PostgreSQL. The LiveKit server a
 
 **Database Connection Errors:**
 - Ensure PostgreSQL is running
-- Check DATABASE_URL in .env
-- Verify database credentials
+- Confirme que o arquivo de configuração contém as credenciais corretas
+- Verifique se as credenciais fornecidas são válidas
 
 **LiveKit Connection Issues:**
 - Verify LiveKit server is running (`curl http://localhost:7880`)
-- Check LIVEKIT_URL in frontend .env.local
+- Verifique a URL configurada para o servidor LiveKit na aplicação frontend
 - Ensure API keys match between frontend and LiveKit server
 
 **Audio Egress Not Working:**
 - Check WebSocket endpoint is accessible
-- Verify AUDIO_EGRESS_OUTPUT_DIR exists and is writable
+- Verifique se o diretório de saída de áudio existe e possui permissão de escrita
 - Check LiveKit egress configuration
 
 **CORS Errors:**
