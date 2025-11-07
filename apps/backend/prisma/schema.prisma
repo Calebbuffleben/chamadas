@@ -1,0 +1,38 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Example model - you can add your own models here
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum SessionStatus {
+  ACTIVE
+  ENDED
+}
+
+model Session {
+  id         String         @id @default(uuid())
+  meetingId  String         @unique
+  roomSid    String?        @unique
+  roomName   String
+  status     SessionStatus  @default(ACTIVE)
+  startedAt  DateTime       @default(now())
+  endedAt    DateTime?
+
+  @@index([roomName])
+}
+

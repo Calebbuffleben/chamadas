@@ -1,0 +1,50 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: livekit-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: livekit-server
+    restart: unless-stopped
+    ports:
+      - "7880:7880"   # HTTP / WebSocket signaling
+      - "7881:7881"   # WebRTC over TCP fallback
+      - "50000-50100:50000-50100/udp" # WebRTC media over UDP
+    volumes:
+      - ./livekit.yaml:/app/livekit.yaml:ro
+    command: ["--config", "/app/livekit.yaml"]
+    depends_on:
+      - redis
+
+  egress:
+    image: livekit/egress:latest
+    container_name: livekit-egress
+    restart: unless-stopped
+    depends_on:
+      - livekit
+      - redis
+    volumes:
+      - ./egress.yaml:/config/egress.yaml:ro
+    # Load variables from .env in this directory
+    env_file:
+      - .env
+    # Configure via environment variables
+    environment:
+      # Prefer EGRESS_* if provided; fallback to LIVEKIT_*; default URL points to service name
+      - EGRESS_API_KEY=${EGRESS_API_KEY:-${LIVEKIT_API_KEY}}
+      - EGRESS_API_SECRET=${EGRESS_API_SECRET:-${LIVEKIT_API_SECRET}}
+      - EGRESS_WS_URL=${EGRESS_WS_URL:-${LIVEKIT_URL:-ws://livekit:7880}}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://livekit:7880}
+      - EGRESS_CONFIG_FILE=/config/egress.yaml
+      - REDIS_URL=redis://redis:6379
+    # Optional health port if you want to probe readiness/liveness
+    # ports:
+    #   - "9090:9090"
+
