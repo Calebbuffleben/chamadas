@@ -4,8 +4,33 @@ import { AppModule } from './app.module';
 import { setupAudioEgressWsServer, setupVideoEgressWsServer } from './egress/media-egress.server';
 import { PrismaService } from './prisma/prisma.service';
 import { AudioPipelineService } from './pipeline/audio-pipeline.service';
+import * as path from 'path';
+import * as fs from 'fs';
 
 async function bootstrap() {
+  // Load env from ./env if present (apps/backend/env)
+  try {
+    const envPath = path.resolve(process.cwd(), 'env');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      for (const raw of content.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+        const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+        if (!match) continue;
+        const key = match[1];
+        let value = match[2];
+        // remove optional surrounding quotes
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        if (process.env[key] === undefined) {
+          process.env[key] = value;
+        }
+      }
+    }
+  } catch {}
+
   const app = await NestFactory.create(AppModule);
 
   // Enable CORS

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 // Use runtime require to avoid type constructibility issues across ws versions
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const WSRuntime = require('ws');
@@ -13,10 +13,10 @@ export type HumeMeta = {
 
 type WsClient = {
   send(data: string | Buffer): void;
-  on(event: 'open', listener: () => void): unknown;
-  on(event: 'message', listener: (data: unknown, isBinary: boolean) => void): unknown;
-  on(event: 'error', listener: (err: Error) => void): unknown;
-  on(event: 'close', listener: () => void): unknown;
+  on(event: 'open', listener: () => unknown): unknown;
+  on(event: 'message', listener: (data: unknown, isBinary: boolean) => unknown): unknown;
+  on(event: 'error', listener: (err: Error) => unknown): unknown;
+  on(event: 'close', listener: (code: number, reason: Buffer) => unknown): unknown;
   close(): void;
 };
 
@@ -24,37 +24,52 @@ type Connection = {
   ws: WsClient;
   isOpen: boolean;
   pending: Array<string>;
+  configured: boolean;
 };
 
 @Injectable()
-export class HumeStreamService {
+export class HumeStreamService implements OnModuleDestroy {
   private readonly logger = new Logger(HumeStreamService.name);
   private readonly wsUrl: string;
-  private readonly apiKey: string | undefined;
+  private readonly wsHeaders: Record<string, string>;
   private keyToConn = new Map<string, Connection>();
 
-  constructor() {
-    // Default endpoint inferred from Hume docs
-    const base = process.env.HUME_WS_URL || 'wss://api.hume.ai/v0/stream/models';
-    this.wsUrl = base;
-    this.apiKey = process.env.HUME_API_KEY;
+  constructor(
+    @Inject('HUME_WS_URL') wsUrl: string,
+    @Inject('HUME_WS_HEADERS') wsHeaders: Record<string, string>,
+  ) {
+    this.wsUrl = wsUrl || 'wss://api.hume.ai/v0/stream/models';
+    this.wsHeaders = wsHeaders || {};
   }
 
   async sendChunk(meta: HumeMeta, wavChunk: Buffer): Promise<void> {
     const key = this.buildKey(meta);
-    const payload = this.buildPayload(meta, wavChunk);
     let conn = this.keyToConn.get(key);
     if (!conn) {
       conn = await this.open(key);
     }
+    // Always include models with each data payload to satisfy Hume's "models configured" requirement
+    const payload = this.buildDataPayload(wavChunk);
+    // Debug what we are about to send
+    try {
+      const info = this.describePayload(payload);
+      const b64 = (JSON.parse(payload) as { data?: string }).data ?? '';
+      const preview = b64.length > 80 ? `${b64.slice(0, 80)}...` : b64;
+      this.logger.log(
+        `[Hume][SEND] ${info} wavBytes=${wavChunk.length} base64Len=${b64.length} preview="${preview}"`
+      );
+    } catch (_e) {}
     if (!conn.isOpen) {
       conn.pending.push(payload);
       return;
     }
     try {
       conn.ws.send(payload);
+      const info = this.describePayload(payload);
+      this.logger.log(`[Hume][SENT] ${info} dispatched`);
     } catch (e) {
-      this.logger.error(`send error for key=${key}: ${String(e)}`);
+      const info = this.describePayload(payload);
+      this.logger.error(`[Hume][SEND][ERROR] ${info}: ${String(e)}`);
       try {
         conn.ws.close();
       } catch {}
@@ -63,55 +78,119 @@ export class HumeStreamService {
   }
 
   private async open(key: string): Promise<Connection> {
-    const headers: Record<string, string> = {};
-    if (this.apiKey) headers['X-Hume-Api-Key'] = this.apiKey;
     const WSClientCtor = WSRuntime as { new (url: string, protocols?: string | string[] | undefined, options?: Record<string, unknown>): WsClient };
-    const ws: WsClient = new WSClientCtor(this.wsUrl, undefined, { headers });
+    const ws: WsClient = new WSClientCtor(this.wsUrl, undefined, { headers: this.wsHeaders });
+    const headerKeys = Object.keys(this.wsHeaders || {});
+    const authPresent = typeof this.wsHeaders?.['X-Hume-Api-Key'] === 'string' && this.wsHeaders['X-Hume-Api-Key'].length > 0;
     this.logger.log(`[Hume] connecting WS for ${key} → ${this.wsUrl}`);
-    const conn: Connection = { ws, isOpen: false, pending: [] };
+    this.logger.log(`[Hume] headers: keys=[${headerKeys.join(', ')}] auth=${authPresent ? 'present' : 'absent'}`);
+    const conn: Connection = { ws, isOpen: false, pending: [], configured: false };
     this.keyToConn.set(key, conn);
 
     ws.on('open', () => {
       this.logger.log(`[Hume] WS open for ${key}`);
       conn.isOpen = true;
-      // Send minimal models config enabling prosody
-      const configMsg = JSON.stringify({ models: { prosody: {} } });
-      ws.send(configMsg);
-      this.logger.log(`[Hume] config sent for ${key}`);
-      for (const msg of conn.pending.splice(0)) ws.send(msg);
+      // Flush any pending payloads (each payload includes models)
+      for (const msg of conn.pending.splice(0)) {
+        try {
+          ws.send(msg);
+          const info = this.describePayload(msg);
+          this.logger.log(`[Hume][SENT] ${info} dispatched (flush)`);
+        } catch (e) {
+          const info = this.describePayload(msg);
+          this.logger.error(`[Hume][SEND][ERROR] ${info} during flush: ${String(e)}`);
+          break;
+        }
+      }
     });
     ws.on('message', (data: unknown, _isBinary: boolean) => {
       const text = typeof data === 'string' ? data : (data as Buffer).toString('utf8');
-      this.logger.log(`[Hume] message for ${key}: ${text.slice(0, 200)}`);
+      const preview = text.length > 200 ? `${text.slice(0, 200)}...` : text;
+      try {
+        const obj: unknown = JSON.parse(text);
+        const isObj = typeof obj === 'object' && obj !== null;
+        // Try to infer status/type and errors
+        let type: string | undefined;
+        let status: string | number | undefined;
+        let errorMsg: string | undefined;
+        if (isObj) {
+          const anyObj = obj as Record<string, unknown>;
+          const t = anyObj['type'];
+          if (typeof t === 'string') type = t;
+          const s = anyObj['status'] ?? anyObj['code'];
+          if (typeof s === 'string' || typeof s === 'number') status = s;
+          const e1 = anyObj['error'];
+          if (typeof e1 === 'string') errorMsg = e1;
+          if (!errorMsg && typeof e1 === 'object' && e1 && 'message' in (e1 as Record<string, unknown>)) {
+            const m = (e1 as Record<string, unknown>)['message'];
+            if (typeof m === 'string') errorMsg = m;
+          }
+          const errs = anyObj['errors'];
+          if (!errorMsg && Array.isArray(errs) && errs.length > 0) {
+            const first = errs[0];
+            if (typeof first === 'string') {
+              errorMsg = first;
+            } else if (first && typeof first === 'object' && 'message' in (first as Record<string, unknown>)) {
+              const m = (first as Record<string, unknown>)['message'];
+              if (typeof m === 'string') errorMsg = m;
+            }
+          }
+        }
+        if (errorMsg) {
+          this.logger.error(`[Hume][RECV][ERROR] type=${type ?? 'unknown'} status=${String(status ?? '')} msg="${errorMsg}" raw="${preview}"`);
+        } else {
+          const keys = isObj ? Object.keys(obj as Record<string, unknown>) : [];
+          this.logger.log(`[Hume][RECV][OK] type=${type ?? 'unknown'} status=${String(status ?? '')} keys=[${keys.slice(0, 10).join(', ')}] raw="${preview}"`);
+        }
+      } catch {
+        this.logger.log(`[Hume][RECV][TEXT] ${preview}`);
+      }
     });
     ws.on('error', (err: Error) => {
-      this.logger.error(`[Hume] WS error for ${key}: ${String(err)}`);
+      this.logger.error(`[Hume][WS][ERROR] for ${key}: ${err.name}: ${err.message}`);
     });
-    ws.on('close', () => {
-      this.logger.warn(`[Hume] WS closed for ${key}`);
+    ws.on('close', (code: number, reason: Buffer) => {
+      const reasonText = Buffer.isBuffer(reason) ? reason.toString('utf8') : String(reason ?? '');
+      this.logger.warn(`[Hume][WS][CLOSE] for ${key}: code=${code} reason="${reasonText}"`);
       this.keyToConn.delete(key);
     });
     return conn;
   }
 
-  private buildPayload(meta: HumeMeta, wavChunk: Buffer): string {
+  private buildDataPayload(wavChunk: Buffer): string {
     const b64 = Buffer.from(wavChunk).toString('base64');
-    return JSON.stringify({
-      models: { prosody: {} },
+    const payload: Record<string, unknown> = {
       data: b64,
-      // optional hints
-      mime_type: 'audio/wav',
-      meetingId: meta.meetingId,
-      participant: meta.participant,
-      track: meta.track,
-      sr: meta.sampleRate,
-      ch: meta.channels,
-    });
+      // always include models to satisfy Hume validator
+      models: { prosody: {} },
+    };
+    return JSON.stringify(payload);
+  }
+
+  private describePayload(payload: string): string {
+    try {
+      const obj = JSON.parse(payload) as { data?: unknown; models?: unknown };
+      const dataLen = typeof obj.data === 'string' ? (obj.data as string).length : 0;
+      return `kind=data+models chars=${payload.length} dataLen=${dataLen}`;
+    } catch {
+      return `chars=${payload.length}`;
+    }
   }
 
   private buildKey(meta: HumeMeta): string {
     return `${meta.meetingId}:${meta.participant}:${meta.track}`;
     }
+
+  onModuleDestroy(): void {
+    // Gracefully close all open WS connections on shutdown
+    for (const [key, conn] of this.keyToConn.entries()) {
+      try {
+        conn.ws.close();
+      } catch {}
+      this.keyToConn.delete(key);
+      this.logger.log(`[Hume] closed WS for ${key}`);
+    }
+  }
 }
 
 

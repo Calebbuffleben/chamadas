@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 
 type StartAudioEgressInput = {
   roomName: string;
@@ -18,11 +18,16 @@ export class LiveKitEgressService {
   private readonly apiSecret: string | undefined;
   private readonly egressWsBase: string;
 
-  constructor() {
-    this.apiUrl = process.env.LIVEKIT_API_URL || process.env.LIVEKIT_HOST || 'http://localhost:7880';
-    this.apiKey = process.env.LIVEKIT_API_KEY;
-    this.apiSecret = process.env.LIVEKIT_API_SECRET;
-    this.egressWsBase = process.env.EGRESS_WS_BASE || 'ws://localhost:3001';
+  constructor(
+    @Inject('LIVEKIT_API_URL') apiUrl: string,
+    @Inject('LIVEKIT_API_KEY') apiKey: string | undefined,
+    @Inject('LIVEKIT_API_SECRET') apiSecret: string | undefined,
+    @Inject('EGRESS_WS_BASE') egressWsBase: string,
+  ) {
+    this.apiUrl = apiUrl;
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
+    this.egressWsBase = egressWsBase;
   }
 
   async startAudioTrackEgress(input: StartAudioEgressInput): Promise<void> {
