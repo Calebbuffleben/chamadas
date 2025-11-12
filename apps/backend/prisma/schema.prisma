@@ -36,3 +36,37 @@ model Session {
   @@index([roomName])
 }
 
+enum FeedbackSeverity {
+  info
+  warning
+  critical
+}
+
+enum FeedbackType {
+  volume_baixo
+  volume_alto
+  silencio_prolongado
+  tendencia_emocional_negativa
+  engajamento_baixo
+  overlap_fala
+  monologo_prolongado
+}
+
+model FeedbackEvent {
+  id             String            @id @default(uuid())
+  meetingId      String
+  participantId  String
+  type           FeedbackType
+  severity       FeedbackSeverity
+  ts             DateTime
+  windowStart    DateTime
+  windowEnd      DateTime
+  message        String
+  metadata       Json
+  createdAt      DateTime          @default(now())
+  expiresAt      DateTime?
+
+  @@index([meetingId, ts])
+  @@index([expiresAt])
+}
+

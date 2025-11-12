@@ -6,4 +6,3 @@ import { AppWebSocketGateway } from './websocket.gateway';
   exports: [AppWebSocketGateway],
 })
 export class WebSocketModule {}
-

@@ -26,7 +26,6 @@ export class AudioPipelineService {
   private readonly defaultGroupSeconds: number;
   private readonly humeTargetSampleRate: number;
   private readonly humeTargetChannels: number = 1;
-  
 
   constructor(private readonly hume: HumeStreamService) {
     const seconds = Number(process.env.AUDIO_PIPELINE_GROUP_SECONDS || '2');
@@ -37,7 +36,8 @@ export class AudioPipelineService {
 
   enqueueChunk(meta: AudioChunkMeta, data: Buffer): void {
     const key = this.buildKey(meta);
-    const groupSeconds = meta.groupSeconds && meta.groupSeconds > 0 ? meta.groupSeconds : this.defaultGroupSeconds;
+    const groupSeconds =
+      meta.groupSeconds && meta.groupSeconds > 0 ? meta.groupSeconds : this.defaultGroupSeconds;
     const thresholdBytes = this.computeThresholdBytes(meta, groupSeconds);
     let state = this.keyToState.get(key);
     if (!state) {
@@ -54,7 +54,11 @@ export class AudioPipelineService {
     state.bytesAccumulated += data.length;
 
     const timeSinceLastFlush = Date.now() - state.lastFlushAt;
-    const timeTriggerMs = Math.max(500, (meta.groupSeconds && meta.groupSeconds > 0 ? meta.groupSeconds : this.defaultGroupSeconds) * 1000);
+    const timeTriggerMs = Math.max(
+      500,
+      (meta.groupSeconds && meta.groupSeconds > 0 ? meta.groupSeconds : this.defaultGroupSeconds) *
+        1000,
+    );
 
     if (state.bytesAccumulated >= state.thresholdBytes || timeSinceLastFlush >= timeTriggerMs) {
       this.flush(meta, key, state);
@@ -79,7 +83,9 @@ export class AudioPipelineService {
     state.lastFlushAt = Date.now();
 
     this.dispatchToHume(meta, payload).catch((err) => {
-      this.logger.error(`Dispatch error for ${key}: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.error(
+        `Dispatch error for ${key}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     });
   }
 
@@ -96,7 +102,7 @@ export class AudioPipelineService {
     const normalize = (process.env.AUDIO_PIPELINE_NORMALIZE || 'false') === 'true';
     const payloadFormat = (process.env.AUDIO_PIPELINE_PAYLOAD || 'wav').toLowerCase(); // prefer wav for WS
     // 1) optional normalization
-    let processedPcm = normalize ? this.normalizeVolume(pcm, meta.channels) : pcm;
+    let processedPcm = normalize ? this.normalizeVolume(pcm) : pcm;
     // 2) convert to mono if needed
     if (meta.channels !== this.humeTargetChannels) {
       processedPcm = this.toMono(processedPcm, meta.channels);
@@ -106,21 +112,25 @@ export class AudioPipelineService {
       processedPcm = this.resampleLinear(processedPcm, meta.sampleRate, this.humeTargetSampleRate);
     }
     // 4) wrap to WAV at target rate/channels for WS
-    const wavBody = payloadFormat === 'wav'
-      ? this.buildWav(processedPcm, this.humeTargetSampleRate, this.humeTargetChannels)
-      : this.buildWav(processedPcm, this.humeTargetSampleRate, this.humeTargetChannels);
+    const wavBody =
+      payloadFormat === 'wav'
+        ? this.buildWav(processedPcm, this.humeTargetSampleRate, this.humeTargetChannels)
+        : this.buildWav(processedPcm, this.humeTargetSampleRate, this.humeTargetChannels);
     await this.appendLocalLog(meta, wavBody.length);
     this.logger.log(
       `Streaming to Hume: format=audio/wav(PCM16LE) sr=${this.humeTargetSampleRate} ch=${this.humeTargetChannels} ` +
-      `bytes=${wavBody.length} meetingId=${meta.meetingId} participant=${meta.participant} track=${meta.track}`
+        `bytes=${wavBody.length} meetingId=${meta.meetingId} participant=${meta.participant} track=${meta.track}`,
     );
-    await this.hume.sendChunk({
-      meetingId: meta.meetingId,
-      participant: meta.participant,
-      track: meta.track,
-      sampleRate: this.humeTargetSampleRate,
-      channels: this.humeTargetChannels,
-    }, wavBody);
+    await this.hume.sendChunk(
+      {
+        meetingId: meta.meetingId,
+        participant: meta.participant,
+        track: meta.track,
+        sampleRate: this.humeTargetSampleRate,
+        channels: this.humeTargetChannels,
+      },
+      wavBody,
+    );
   }
 
   // Imentiv HTTP removed. WS-based real-time streaming via Hume.
@@ -179,7 +189,11 @@ export class AudioPipelineService {
     const inSamples = pcmMonoS16le.length / 2;
     const outSamples = Math.round(inSamples * (dstRate / srcRate));
     const out = Buffer.allocUnsafe(outSamples * 2);
-    const inView = new DataView(pcmMonoS16le.buffer, pcmMonoS16le.byteOffset, pcmMonoS16le.byteLength);
+    const inView = new DataView(
+      pcmMonoS16le.buffer,
+      pcmMonoS16le.byteOffset,
+      pcmMonoS16le.byteLength,
+    );
     const outView = new DataView(out.buffer, out.byteOffset, out.byteLength);
     for (let i = 0; i < outSamples; i++) {
       const t = i * (srcRate / dstRate);
@@ -195,7 +209,7 @@ export class AudioPipelineService {
     return out;
   }
 
-  private normalizeVolume(pcmS16le: Buffer, channels: number): Buffer {
+  private normalizeVolume(pcmS16le: Buffer): Buffer {
     // Simple peak normalization to ~0.9 of full scale
     const view = new DataView(pcmS16le.buffer, pcmS16le.byteOffset, pcmS16le.byteLength);
     let peak = 0;
@@ -211,12 +225,10 @@ export class AudioPipelineService {
     const out = Buffer.allocUnsafe(pcmS16le.length);
     const outView = new DataView(out.buffer, out.byteOffset, out.byteLength);
     for (let i = 0; i < pcmS16le.length; i += 2) {
-      let sample = view.getInt16(i, true);
-      let scaled = Math.max(-32768, Math.min(32767, Math.round(sample * gain)));
+      const sample = view.getInt16(i, true);
+      const scaled = Math.max(-32768, Math.min(32767, Math.round(sample * gain)));
       outView.setInt16(i, scaled, true);
     }
     return out;
   }
 }
-
-

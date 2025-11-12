@@ -32,7 +32,15 @@ export class LiveKitEgressService {
 
   async startAudioTrackEgress(input: StartAudioEgressInput): Promise<void> {
     const { roomName, participant, trackId, meetingId, sampleRate, channels, groupSeconds } = input;
-    const wsUrl = this.buildEgressWsUrl({ roomName, participant: participant ?? '', trackId, meetingId, sampleRate, channels, groupSeconds });
+    const wsUrl = this.buildEgressWsUrl({
+      roomName,
+      participant: participant ?? '',
+      trackId,
+      meetingId,
+      sampleRate,
+      channels,
+      groupSeconds,
+    });
     const { EgressClient } = await import('livekit-server-sdk');
     if (!this.apiKey || !this.apiSecret) {
       this.logger.warn('LIVEKIT_API_KEY/SECRET not set; skipping startTrackEgress');
@@ -61,7 +69,15 @@ export class LiveKitEgressService {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  private buildEgressWsUrl(args: { roomName: string; participant: string; trackId: string; meetingId: string; sampleRate: number; channels: number; groupSeconds?: number }): string {
+  private buildEgressWsUrl(args: {
+    roomName: string;
+    participant: string;
+    trackId: string;
+    meetingId: string;
+    sampleRate: number;
+    channels: number;
+    groupSeconds?: number;
+  }): string {
     const base = new URL('/egress-audio', this.egressWsBase);
     base.searchParams.set('roomName', args.roomName);
     if (args.participant) base.searchParams.set('participant', args.participant);
@@ -69,9 +85,8 @@ export class LiveKitEgressService {
     base.searchParams.set('meetingId', args.meetingId);
     base.searchParams.set('sampleRate', String(args.sampleRate));
     base.searchParams.set('channels', String(args.channels));
-    if (args.groupSeconds && args.groupSeconds > 0) base.searchParams.set('groupSeconds', String(args.groupSeconds));
+    if (args.groupSeconds && args.groupSeconds > 0)
+      base.searchParams.set('groupSeconds', String(args.groupSeconds));
     return base.toString();
   }
 }
-
-

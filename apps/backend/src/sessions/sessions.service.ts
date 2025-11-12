@@ -12,11 +12,27 @@ type SessionRecord = { meetingId: string };
 interface SessionDelegateSubset {
   upsert(args: {
     where: { meetingId: string };
-    create: { meetingId: string; roomName: string; roomSid: string | null; status: SessionStatusLiteral };
-    update: { roomName: string; roomSid: string | null; status: SessionStatusLiteral; endedAt: Date | null };
+    create: {
+      meetingId: string;
+      roomName: string;
+      roomSid: string | null;
+      status: SessionStatusLiteral;
+    };
+    update: {
+      roomName: string;
+      roomSid: string | null;
+      status: SessionStatusLiteral;
+      endedAt: Date | null;
+    };
   }): Promise<SessionRecord>;
-  update(args: { where: { meetingId: string }; data: { status: 'ENDED'; endedAt: Date } }): Promise<SessionRecord>;
-  findFirst(args: { where: { roomName: string; status: SessionStatusLiteral }; orderBy: { startedAt: 'desc' } }): Promise<SessionRecord | null>;
+  update(args: {
+    where: { meetingId: string };
+    data: { status: 'ENDED'; endedAt: Date };
+  }): Promise<SessionRecord>;
+  findFirst(args: {
+    where: { roomName: string; status: SessionStatusLiteral };
+    orderBy: { startedAt: 'desc' };
+  }): Promise<SessionRecord | null>;
 }
 type PrismaSessionAPI = { session: SessionDelegateSubset };
 
@@ -61,5 +77,3 @@ export class SessionsService {
     });
   }
 }
-
-

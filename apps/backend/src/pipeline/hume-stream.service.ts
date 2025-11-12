@@ -1,4 +1,8 @@
 import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { createHash } from 'crypto';
+import { ParticipantIndexService } from '../livekit/participant-index.service';
+import { FeedbackIngestionEvent } from '../feedback/feedback.types';
 // Use runtime require to avoid type constructibility issues across ws versions
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const WSRuntime = require('ws');
@@ -37,6 +41,8 @@ export class HumeStreamService implements OnModuleDestroy {
   constructor(
     @Inject('HUME_WS_URL') wsUrl: string,
     @Inject('HUME_WS_HEADERS') wsHeaders: Record<string, string>,
+    private readonly emitter: EventEmitter2,
+    private readonly participantIndex: ParticipantIndexService,
   ) {
     this.wsUrl = wsUrl || 'wss://api.hume.ai/v0/stream/models';
     this.wsHeaders = wsHeaders || {};
@@ -48,6 +54,36 @@ export class HumeStreamService implements OnModuleDestroy {
     if (!conn) {
       conn = await this.open(key);
     }
+    // Emit local ingestion event with RMS from the WAV chunk (pre-Hume), so volume heuristics work
+    try {
+      const rmsDbfs = this.computeRmsDbfsFromWav(wavChunk);
+      const [meetingId, participant, track] = this.parseKey(key);
+      const participantRole = this.participantIndex.getParticipantRole(meetingId, participant);
+      const speechDetected = Number.isFinite(rmsDbfs) ? rmsDbfs > -50 : false;
+      const evt: FeedbackIngestionEvent = {
+        version: 1,
+        meetingId,
+        roomName: undefined,
+        trackSid: track,
+        participantId: participant,
+        participantRole,
+        ts: Date.now(),
+        prosody: {
+          speechDetected,
+          warnings: [],
+        },
+        signal: {
+          rmsDbfs: Number.isFinite(rmsDbfs) ? rmsDbfs : undefined,
+        },
+        debug: {
+          rawPreview: 'local:rms',
+          rawHash: this.sha256(`rms:${rmsDbfs}`),
+        },
+      };
+      this.emitter.emit('feedback.ingestion', evt);
+    } catch (e) {
+      this.logger.warn(`[Hume][RMS] failed to compute rms: ${e instanceof Error ? e.message : String(e)}`);
+    }
     // Always include models with each data payload to satisfy Hume's "models configured" requirement
     const payload = this.buildDataPayload(wavChunk);
     // Debug what we are about to send
@@ -56,7 +92,7 @@ export class HumeStreamService implements OnModuleDestroy {
       const b64 = (JSON.parse(payload) as { data?: string }).data ?? '';
       const preview = b64.length > 80 ? `${b64.slice(0, 80)}...` : b64;
       this.logger.log(
-        `[Hume][SEND] ${info} wavBytes=${wavChunk.length} base64Len=${b64.length} preview="${preview}"`
+        `[Hume][SEND] ${info} wavBytes=${wavChunk.length} base64Len=${b64.length} preview="${preview}"`,
       );
     } catch (_e) {}
     if (!conn.isOpen) {
@@ -78,12 +114,22 @@ export class HumeStreamService implements OnModuleDestroy {
   }
 
   private async open(key: string): Promise<Connection> {
-    const WSClientCtor = WSRuntime as { new (url: string, protocols?: string | string[] | undefined, options?: Record<string, unknown>): WsClient };
+    const WSClientCtor = WSRuntime as {
+      new (
+        url: string,
+        protocols?: string | string[] | undefined,
+        options?: Record<string, unknown>,
+      ): WsClient;
+    };
     const ws: WsClient = new WSClientCtor(this.wsUrl, undefined, { headers: this.wsHeaders });
     const headerKeys = Object.keys(this.wsHeaders || {});
-    const authPresent = typeof this.wsHeaders?.['X-Hume-Api-Key'] === 'string' && this.wsHeaders['X-Hume-Api-Key'].length > 0;
+    const authPresent =
+      typeof this.wsHeaders?.['X-Hume-Api-Key'] === 'string' &&
+      this.wsHeaders['X-Hume-Api-Key'].length > 0;
     this.logger.log(`[Hume] connecting WS for ${key} → ${this.wsUrl}`);
-    this.logger.log(`[Hume] headers: keys=[${headerKeys.join(', ')}] auth=${authPresent ? 'present' : 'absent'}`);
+    this.logger.log(
+      `[Hume] headers: keys=[${headerKeys.join(', ')}] auth=${authPresent ? 'present' : 'absent'}`,
+    );
     const conn: Connection = { ws, isOpen: false, pending: [], configured: false };
     this.keyToConn.set(key, conn);
 
@@ -103,7 +149,8 @@ export class HumeStreamService implements OnModuleDestroy {
         }
       }
     });
-    ws.on('message', (data: unknown, _isBinary: boolean) => {
+    ws.on('message', (data: unknown, isBinary: boolean) => {
+      void isBinary;
       const text = typeof data === 'string' ? data : (data as Buffer).toString('utf8');
       const preview = text.length > 200 ? `${text.slice(0, 200)}...` : text;
       try {
@@ -121,7 +168,12 @@ export class HumeStreamService implements OnModuleDestroy {
           if (typeof s === 'string' || typeof s === 'number') status = s;
           const e1 = anyObj['error'];
           if (typeof e1 === 'string') errorMsg = e1;
-          if (!errorMsg && typeof e1 === 'object' && e1 && 'message' in (e1 as Record<string, unknown>)) {
+          if (
+            !errorMsg &&
+            typeof e1 === 'object' &&
+            e1 &&
+            'message' in (e1 as Record<string, unknown>)
+          ) {
             const m = (e1 as Record<string, unknown>)['message'];
             if (typeof m === 'string') errorMsg = m;
           }
@@ -130,17 +182,66 @@ export class HumeStreamService implements OnModuleDestroy {
             const first = errs[0];
             if (typeof first === 'string') {
               errorMsg = first;
-            } else if (first && typeof first === 'object' && 'message' in (first as Record<string, unknown>)) {
+            } else if (
+              first &&
+              typeof first === 'object' &&
+              'message' in (first as Record<string, unknown>)
+            ) {
               const m = (first as Record<string, unknown>)['message'];
               if (typeof m === 'string') errorMsg = m;
             }
           }
+          // Emit normalized prosody ingestion event if present
+          const prosody = anyObj['prosody'];
+          if (prosody && typeof prosody === 'object') {
+            const warnings: string[] = [];
+            let speechDetected = true;
+            // Common pattern: { warning: "No speech detected.", code: "W0105" }
+            const p = prosody as Record<string, unknown>;
+            const warningText = p['warning'];
+            const codeText = p['code'];
+            if (typeof warningText === 'string') warnings.push(warningText);
+            if (typeof codeText === 'string') warnings.push(codeText);
+            if (warnings.join(' ').toLowerCase().includes('no speech')) {
+              speechDetected = false;
+            }
+            if (warnings.includes('W0105')) {
+              speechDetected = false;
+            }
+            const [meetingId, participant, track] = this.parseKey(key);
+            const participantRole = this.participantIndex.getParticipantRole(
+              meetingId,
+              participant,
+            );
+            const evt: FeedbackIngestionEvent = {
+              version: 1,
+              meetingId,
+              roomName: undefined,
+              trackSid: track,
+              participantId: participant,
+              participantRole,
+              ts: Date.now(),
+              prosody: {
+                speechDetected,
+                warnings,
+              },
+              debug: {
+                rawPreview: preview,
+                rawHash: this.sha256(text),
+              },
+            };
+            this.emitter.emit('feedback.ingestion', evt);
+          }
         }
         if (errorMsg) {
-          this.logger.error(`[Hume][RECV][ERROR] type=${type ?? 'unknown'} status=${String(status ?? '')} msg="${errorMsg}" raw="${preview}"`);
+          this.logger.error(
+            `[Hume][RECV][ERROR] type=${type ?? 'unknown'} status=${String(status ?? '')} msg="${errorMsg}" raw="${preview}"`,
+          );
         } else {
           const keys = isObj ? Object.keys(obj as Record<string, unknown>) : [];
-          this.logger.log(`[Hume][RECV][OK] type=${type ?? 'unknown'} status=${String(status ?? '')} keys=[${keys.slice(0, 10).join(', ')}] raw="${preview}"`);
+          this.logger.log(
+            `[Hume][RECV][OK] type=${type ?? 'unknown'} status=${String(status ?? '')} keys=[${keys.slice(0, 10).join(', ')}] raw="${preview}"`,
+          );
         }
       } catch {
         this.logger.log(`[Hume][RECV][TEXT] ${preview}`);
@@ -179,7 +280,40 @@ export class HumeStreamService implements OnModuleDestroy {
 
   private buildKey(meta: HumeMeta): string {
     return `${meta.meetingId}:${meta.participant}:${meta.track}`;
+  }
+
+  private parseKey(key: string): [string, string, string] {
+    const parts = key.split(':');
+    const meetingId = parts[0] ?? '';
+    const participant = parts[1] ?? '';
+    const track = parts[2] ?? '';
+    return [meetingId, participant, track];
+  }
+
+  private sha256(text: string): string {
+    return createHash('sha256').update(text).digest('hex');
+  }
+
+  private computeRmsDbfsFromWav(wav: Buffer): number {
+    if (wav.length < 44) return Number.NEGATIVE_INFINITY;
+    const dataOffset = 44;
+    const pcmLen = wav.length - dataOffset;
+    if (pcmLen <= 0) return Number.NEGATIVE_INFINITY;
+    const view = new DataView(wav.buffer, wav.byteOffset + dataOffset, pcmLen);
+    let sumSquares = 0;
+    const n = Math.floor(pcmLen / 2);
+    if (n <= 0) return Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < n; i++) {
+      const s = view.getInt16(i * 2, true);
+      const norm = s / 32768;
+      sumSquares += norm * norm;
     }
+    const rms = Math.sqrt(sumSquares / n);
+    if (rms <= 0) return Number.NEGATIVE_INFINITY;
+    const dbfs = 20 * Math.log10(rms);
+    // Clamp to a floor to avoid -Infinity downstream
+    return Math.max(-100, Math.min(0, dbfs));
+  }
 
   onModuleDestroy(): void {
     // Gracefully close all open WS connections on shutdown
@@ -192,5 +326,3 @@ export class HumeStreamService implements OnModuleDestroy {
     }
   }
 }
-
-

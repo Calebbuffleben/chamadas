@@ -6,6 +6,7 @@ import { PrismaService } from './prisma/prisma.service';
 import { AudioPipelineService } from './pipeline/audio-pipeline.service';
 import * as path from 'path';
 import * as fs from 'fs';
+import type { Request, Response, NextFunction } from 'express';
 
 async function bootstrap() {
   // Load env from ./env if present (apps/backend/env)
@@ -21,7 +22,10 @@ async function bootstrap() {
         const key = match[1];
         let value = match[2];
         // remove optional surrounding quotes
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
           value = value.slice(1, -1);
         }
         if (process.env[key] === undefined) {
@@ -40,7 +44,7 @@ async function bootstrap() {
   });
 
   // Parse LiveKit webhooks (application/webhook+json) sem depender de express/body-parser
-  app.use((req: any, _res: any, next: () => void) => {
+  app.use((req: Request, _res: Response, next: NextFunction) => {
     const ct = (req.headers['content-type'] as string) || '';
     if (ct.includes('application/webhook+json')) {
       let data = '';
@@ -72,14 +76,23 @@ async function bootstrap() {
   const httpServer = app.getHttpServer();
   const prisma = app.get(PrismaService);
   const audioPipeline = app.get(AudioPipelineService);
-  setupAudioEgressWsServer(httpServer, {
-    path: '/egress-audio',
-    outputDir: process.env.EGRESS_AUDIO_OUTPUT_DIR,
-  }, prisma, audioPipeline);
-  setupVideoEgressWsServer(httpServer, {
-    path: '/egress-video',
-    outputDir: process.env.EGRESS_VIDEO_OUTPUT_DIR,
-  }, prisma);
+  setupAudioEgressWsServer(
+    httpServer,
+    {
+      path: '/egress-audio',
+      outputDir: process.env.EGRESS_AUDIO_OUTPUT_DIR,
+    },
+    prisma,
+    audioPipeline,
+  );
+  setupVideoEgressWsServer(
+    httpServer,
+    {
+      path: '/egress-video',
+      outputDir: process.env.EGRESS_VIDEO_OUTPUT_DIR,
+    },
+    prisma,
+  );
 
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');
@@ -88,4 +101,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-

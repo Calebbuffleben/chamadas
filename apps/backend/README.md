@@ -290,6 +290,46 @@ O backend gerencia automaticamente sessões de reunião através de webhooks do 
 }
 ```
 
+## Feedback em Tempo Real (Host)
+
+O backend gera feedbacks para o anfitrião com base no áudio dos participantes (Hume prosody + sinais locais).
+
+### Tipos Suportados
+- volume_baixo / volume_alto
+- silencio_prolongado
+- overlap_fala
+- monologo_prolongado
+
+### Entrega
+- Socket.IO: o anfitrião deve ingressar na sala `feedback:<meetingId>`
+- Evento: `feedback` com payload:
+```json
+{
+  "id": "fb-uuid",
+  "type": "volume_baixo",
+  "severity": "warning",
+  "ts": 1731368534123,
+  "meetingId": "RM_123",
+  "participantId": "user_abc",
+  "window": { "start": 1731368531000, "end": 1731368534000 },
+  "message": "Fulano: volume baixo; aproxime-se do microfone.",
+  "tips": ["Verifique entrada de áudio"],
+  "metadata": { "rmsDbfs": -29.7, "speechCoverage": 0.62 }
+}
+```
+
+### Identidade/Papel
+- O frontend deve emitir token com `metadata` do LiveKit contendo `{"roles":["host"],"name":"<Nome>"}` para o anfitrião.
+- O backend identifica múltiplos anfitriões e não gera feedback sobre o próprio anfitrião.
+
+### Endpoints de Observabilidade
+- `GET /feedback/debug/:meetingId` — visão instantânea por participante (cobertura de fala 10s, RMS médio 3s, EMA de RMS)
+- `GET /feedback/metrics/:meetingId` — contadores por tipo e média de latência (ms) das últimas amostras
+
+### Persistência (TTL)
+- Feedbacks são gravados em `FeedbackEvent` (Prisma). TTL configurável por `FEEDBACK_TTL_DAYS` (padrão 14).
+- Limpeza oportunista ocorre nas inserções (exclui expirados).
+
 **Associação automática:**
 - Egress streams são automaticamente associados a sessões via `meetingId`
 - Se `meetingId` não for fornecido na query, o sistema busca sessão ativa por `roomName`

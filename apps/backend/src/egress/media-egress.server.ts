@@ -7,7 +7,9 @@ import type { Socket } from 'net';
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 type SessionStatusLiteral = 'ACTIVE' | 'ENDED';
-interface SessionLookup { meetingId: string }
+interface SessionLookup {
+  meetingId: string;
+}
 interface PrismaSessionDelegate {
   findFirst(params: {
     where: { roomName: string; status: SessionStatusLiteral };
@@ -16,12 +18,13 @@ interface PrismaSessionDelegate {
 }
 
 function extractSession(prisma: unknown): PrismaSessionDelegate | undefined {
-  if (typeof prisma === 'object' && prisma !== null && 'session' in (prisma as Record<string, unknown>)) {
+  if (
+    typeof prisma === 'object' &&
+    prisma !== null &&
+    'session' in (prisma as Record<string, unknown>)
+  ) {
     const candidate = (prisma as { session?: unknown }).session;
-    if (
-      candidate &&
-      typeof (candidate as { findFirst?: unknown }).findFirst === 'function'
-    ) {
+    if (candidate && typeof (candidate as { findFirst?: unknown }).findFirst === 'function') {
       return candidate as PrismaSessionDelegate;
     }
   }
@@ -29,14 +32,17 @@ function extractSession(prisma: unknown): PrismaSessionDelegate | undefined {
 }
 
 type AudioPipelineLike = {
-  enqueueChunk(args: {
-    meetingId: string;
-    participant: string;
-    track: string;
-    sampleRate: number;
-    channels: number;
-    groupSeconds?: number;
-  }, data: Buffer): void | Promise<void>;
+  enqueueChunk(
+    args: {
+      meetingId: string;
+      participant: string;
+      track: string;
+      sampleRate: number;
+      channels: number;
+      groupSeconds?: number;
+    },
+    data: Buffer,
+  ): void | Promise<void>;
   clear(args: {
     meetingId: string;
     participant: string;
@@ -152,7 +158,7 @@ export function setupAudioEgressWsServer(
       if (!url.startsWith(options.path)) {
         return; // ignore other upgrade paths
       }
-      wss.handleUpgrade(request, socket as unknown as any, head, (ws) => {
+      wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });
     } catch (err) {
@@ -215,26 +221,34 @@ export function setupAudioEgressWsServer(
               buf = data as Buffer;
             } else if (data instanceof ArrayBuffer) {
               buf = Buffer.from(data);
+            } else if (ArrayBuffer.isView(data)) {
+              buf = Buffer.from(data);
             } else {
-              buf = Buffer.from(data as any);
+              throw new Error(`Unsupported binary frame payload type: ${typeof data}`);
             }
             totalBytes += buf.length;
             await wav.appendPcm(buf);
             if (meetingId && pipeline) {
-              await pipeline.enqueueChunk({
-                meetingId,
-                participant,
-                track,
-                sampleRate,
-                channels,
-                groupSeconds,
-              }, buf);
+              await pipeline.enqueueChunk(
+                {
+                  meetingId,
+                  participant,
+                  track,
+                  sampleRate,
+                  channels,
+                  groupSeconds,
+                },
+                buf,
+              );
             }
           }
           return;
         }
         // text frame: expected JSON with events like { muted: true }
-        const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data as any);
+        const text =
+          Buffer.isBuffer(data) || data instanceof Uint8Array
+            ? Buffer.from(data).toString('utf8')
+            : String(data);
         try {
           const payload = JSON.parse(text) as { muted?: boolean };
           if (typeof payload.muted === 'boolean') {
@@ -339,7 +353,7 @@ export function setupVideoEgressWsServer(
       if (!url.startsWith(options.path)) {
         return;
       }
-      wss.handleUpgrade(request, socket as unknown as any, head, (ws) => {
+      wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });
     } catch (err) {
@@ -392,7 +406,8 @@ export function setupVideoEgressWsServer(
           if (Array.isArray(data)) buf = Buffer.concat(data);
           else if (Buffer.isBuffer(data)) buf = data as Buffer;
           else if (data instanceof ArrayBuffer) buf = Buffer.from(data);
-          else buf = Buffer.from(data as any);
+          else if (ArrayBuffer.isView(data)) buf = Buffer.from(data);
+          else throw new Error(`Unsupported video binary payload type: ${typeof data}`);
           totalBytes += buf.length;
           await writer.append(buf);
           return;
@@ -426,5 +441,3 @@ export function setupVideoEgressWsServer(
     `Video Egress WS ready on path ${options.path}, writing to ${path.resolve(options.outputDir)}`,
   );
 }
-
-
