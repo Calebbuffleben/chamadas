@@ -30,7 +30,6 @@ import { useRouter } from 'next/navigation';
 import { useSetupE2EE } from '@/lib/useSetupE2EE';
 import { useLowCPUOptimizer } from '@/lib/usePerfomanceOptimiser';
 import { useHostFeedback } from '@/lib/useHostFeedback';
-import { Toaster } from 'react-hot-toast';
 import { FeedbackPanel } from '@/lib/FeedbackPanel';
 
 const CONN_DETAILS_ENDPOINT =
@@ -232,7 +231,6 @@ function VideoConferenceComponent(props: {
   return (
     <div className="lk-room-container">
       <RoomContext.Provider value={room}>
-        <Toaster position="top-right" />
         <FeedbackPanel />
         <KeyboardShortcuts />
         <VideoConference

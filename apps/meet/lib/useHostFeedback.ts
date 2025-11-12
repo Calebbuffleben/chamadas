@@ -37,6 +37,8 @@ function isHost(metadata: string | null | undefined): boolean {
 
 export function useHostFeedback(room: Room | undefined, roomName: string | undefined) {
   const socketRef = useRef<Socket | null>(null);
+  const seenRef = useRef<Set<string>>(new Set());
+  const lastJoinedRef = useRef<string | null>(null);
   const backendBase = useMemo(() => {
     return process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
   }, []);
@@ -52,7 +54,7 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
     let cancelled = false;
     const controller = new AbortController();
 
-    const resolveMeetingId = async (): Promise<string> => {
+    const resolveMeetingId: () => Promise<string> = async () => {
       try {
         const url = new URL('/sessions/resolve', backendBase);
         url.searchParams.set('roomName', roomName);
@@ -94,17 +96,20 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
           console.log('[feedback] socket connected, joining room', `feedback:${meetingId}`);
           toast.success(`Feedback conectado (${meetingId})`, { duration: Infinity, id: `fb-connect-${meetingId}` });
         }
-        s!.emit('join-room', `feedback:${meetingId}`);
-        // Also join by roomName as fallback if meetingId differs
-        if (roomName && roomName !== meetingId) {
-          if (debug) {
-            // eslint-disable-next-line no-console
-            console.log('[feedback] also joining fallback room', `feedback:${roomName}`);
-            toast(`Fallback: ${roomName}`, { duration: Infinity, id: `fb-fallback-${roomName}` });
-          }
-          s!.emit('join-room', `feedback:${roomName}`);
+        if (lastJoinedRef.current !== meetingId) {
+          s!.emit('join-room', `feedback:${meetingId}`);
+          lastJoinedRef.current = meetingId;
         }
       });
+      // If the socket is already connected, join immediately to avoid missing the connect event
+      if (s.connected && lastJoinedRef.current !== meetingId) {
+        if (debug) {
+          // eslint-disable-next-line no-console
+          console.log('[feedback] joining on already-connected socket', `feedback:${meetingId}`);
+        }
+        s.emit('join-room', `feedback:${meetingId}`);
+        lastJoinedRef.current = meetingId;
+      }
       s.on('connect_error', (err: Error) => {
         if (debug) {
           // eslint-disable-next-line no-console
@@ -134,6 +139,19 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
         }
       });
       s.on('feedback', (payload: FeedbackPayload) => {
+        // de-duplicate by payload id
+        if (payload?.id) {
+          if (seenRef.current.has(payload.id)) {
+            return;
+          }
+          seenRef.current.add(payload.id);
+          // keep seen set bounded
+          if (seenRef.current.size > 200) {
+            // remove oldest arbitrarily
+            const first = seenRef.current.values().next().value as string | undefined;
+            if (first) seenRef.current.delete(first);
+          }
+        }
         // Dispatch browser event for a persistent in-call panel
         try {
           const evt = new CustomEvent<FeedbackPayload>('host-feedback', { detail: payload });
@@ -143,13 +161,10 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
         }
         // Toast with longer durations
         const text = payload.message;
-        if (payload.severity === 'critical') {
-          toast.error(text, { duration: 12000 });
-        } else if (payload.severity === 'warning') {
-          toast(text, { duration: 8000 });
-        } else {
-          toast.success(text, { duration: 6000 });
-        }
+        const toastId = payload.id || `${payload.type}-${payload.ts}`;
+        if (payload.severity === 'critical') toast.error(text, { duration: 12000, id: toastId });
+        else if (payload.severity === 'warning') toast(text, { duration: 8000, id: toastId });
+        else toast.success(text, { duration: 6000, id: toastId });
       });
     };
 
@@ -171,6 +186,7 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
           socketRef.current.disconnect();
         } catch {}
         socketRef.current = null;
+        lastJoinedRef.current = null;
       }
     };
   }, [room, roomName, backendBase]);

@@ -29,9 +29,19 @@ export function FeedbackPanel() {
       const payload = ce.detail;
       if (!payload) return;
       setItems((prev) => {
-        const next: Item[] = [{ ...payload, receivedAt: Date.now() }, ...prev];
-        if (next.length > MAX_ITEMS) next.length = MAX_ITEMS;
-        return next;
+        const existingIdx = prev.findIndex((p) => p.id === payload.id);
+        const updated: Item = { ...payload, receivedAt: Date.now() };
+        if (existingIdx >= 0) {
+          const copy = prev.slice();
+          copy.splice(existingIdx, 1);
+          const next = [updated, ...copy];
+          if (next.length > MAX_ITEMS) next.length = MAX_ITEMS;
+          return next;
+        } else {
+          const next = [updated, ...prev];
+          if (next.length > MAX_ITEMS) next.length = MAX_ITEMS;
+          return next;
+        }
       });
     };
     window.addEventListener('host-feedback', onFeedback as EventListener);
