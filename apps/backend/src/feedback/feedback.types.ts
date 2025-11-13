@@ -51,7 +51,11 @@ export interface FeedbackEventPayload {
     | 'entusiasmo_alto'
     | 'monotonia_prosodica'
     | 'energia_grupo_baixa'
-    | 'interrupcoes_frequentes';
+    | 'interrupcoes_frequentes'
+    | 'polarizacao_emocional'
+    | 'efeito_pos_interrupcao'
+    | 'ritmo_acelerado'
+    | 'ritmo_pausado';
   severity: FeedbackSeverity;
   ts: number;
   meetingId: string;

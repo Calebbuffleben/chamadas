@@ -55,6 +55,10 @@ enum FeedbackType {
   monotonia_prosodica
   energia_grupo_baixa
   interrupcoes_frequentes
+  polarizacao_emocional
+  efeito_pos_interrupcao
+  ritmo_acelerado
+  ritmo_pausado
 }
 
 model FeedbackEvent {

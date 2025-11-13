@@ -35,6 +35,11 @@ export class FeedbackAggregatorService {
   private readonly overlapHistoryByMeeting = new Map<string, number[]>(); // timestamps for overlap detections
   private readonly lastOverlapSampleAtByMeeting = new Map<string, number>(); // throttle overlap sampling
   private readonly meetingCooldownByType = new Map<string, number>(); // key=`${meetingId}:${type}` -> until timestamp
+  private readonly lastSpeakerByMeeting = new Map<string, string>(); // meetingId -> participantId
+  private readonly postInterruptionCandidatesByMeeting = new Map<
+    string,
+    Array<{ ts: number; interruptedId: string; valenceBefore?: number }>
+  >();
 
   constructor(
     private readonly delivery: FeedbackDeliveryService,
@@ -78,10 +83,18 @@ export class FeedbackAggregatorService {
     this.evaluateEntusiasmoAlto(evt.meetingId, participantId, state, evt.ts);
     // Monotonia prosódica (baixa variância de arousal)
     this.evaluateMonotoniaProsodica(evt.meetingId, participantId, state, evt.ts);
+    // Ritmo acelerado/pausado por alternância de VAD
+    this.evaluateRitmoAceleradoPausado(evt.meetingId, participantId, state, evt.ts);
     // Queda de energia do grupo (arousal médio baixo entre convidados)
     this.evaluateEnergiaGrupoBaixa(evt.meetingId, evt.ts);
+    // Polarização emocional do grupo
+    this.evaluatePolarizacaoEmocional(evt.meetingId, evt.ts);
+    // Atualiza rastreamento de último orador (para efeito pós-interrupção)
+    this.updateSpeakerTracking(evt.meetingId, evt.ts);
     // Interrupções frequentes (contagem de overlaps por minuto)
     this.evaluateInterrupcoesFrequentes(evt.meetingId, participantId, evt.ts);
+    // Efeito pós-interrupção (queda de valence do interrompido)
+    this.evaluateEfeitoPosInterrupcao(evt.meetingId, evt.ts);
     // Overlap de fala (heurística simples por cobertura na janela longa)
     this.evaluateOverlapFala(evt.meetingId, participantId, evt.ts);
     // Monólogo prolongado (60s)
@@ -589,6 +602,20 @@ export class FeedbackAggregatorService {
         const cutoff = now - 60000;
         while (arr.length > 0 && arr[0] < cutoff) arr.shift();
         this.overlapHistoryByMeeting.set(meetingId, arr);
+        // Capturar candidato a pós-interrupção: se novo orador começou sobre o último orador
+        const lastSpeaker = this.lastSpeakerByMeeting.get(meetingId);
+        if (lastSpeaker) {
+          const someoneElseSpeaking = covers.some((c) => c.id !== lastSpeaker && c.coverage >= 0.2);
+          if (someoneElseSpeaking) {
+            const st = this.byKey.get(this.key(meetingId, lastSpeaker));
+            const before = st?.ema.valence;
+            const list = this.postInterruptionCandidatesByMeeting.get(meetingId) ?? [];
+            list.push({ ts: now, interruptedId: lastSpeaker, valenceBefore: before });
+            // manter no máximo 10 registros
+            while (list.length > 10) list.shift();
+            this.postInterruptionCandidatesByMeeting.set(meetingId, list);
+          }
+        }
       }
     }
     const arr = this.overlapHistoryByMeeting.get(meetingId) ?? [];
@@ -626,6 +653,240 @@ export class FeedbackAggregatorService {
       this.delivery.publishToHosts(meetingId, payload);
       // reset history after firing to avoid immediate re-triggers
       this.overlapHistoryByMeeting.set(meetingId, []);
+    }
+  }
+
+  private evaluatePolarizacaoEmocional(meetingId: string, now: number): void {
+    const participants = this.participantsForMeeting(meetingId);
+    if (participants.length < 3) return;
+    const negVals: number[] = [];
+    const posVals: number[] = [];
+    for (const [pid, st] of participants) {
+      if (this.index.getParticipantRole(meetingId, pid) === 'host') continue;
+      const w = this.window(st, now, this.longWindowMs);
+      if (w.samplesCount === 0) continue;
+      const coverage = w.speechCount / w.samplesCount;
+      if (coverage < 0.3) continue;
+      const v = st.ema.valence;
+      if (typeof v !== 'number') continue;
+      if (v <= -0.2) negVals.push(v);
+      if (v >= 0.2) posVals.push(v);
+    }
+    if (negVals.length === 0 || posVals.length === 0) return;
+    const mean = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+    const negMean = mean(negVals);
+    const posMean = mean(posVals);
+    if (posMean - negMean >= 0.5) {
+      const type = 'polarizacao_emocional';
+      if (this.inCooldownMeeting(meetingId, type, now)) return;
+      this.setCooldownMeeting(meetingId, type, now, 45000);
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId: 'group',
+        window: { start: now - this.longWindowMs, end: now },
+        message: `Polarização emocional no grupo (opiniões muito divergentes).`,
+        tips: ['Reconheça pontos de ambos os lados', 'Estabeleça objetivos comuns antes de decidir'],
+        metadata: {
+          valenceEMA: Number(((posMean + negMean) / 2).toFixed(3)),
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private updateSpeakerTracking(meetingId: string, now: number): void {
+    const participants = this.participantsForMeeting(meetingId);
+    if (participants.length === 0) return;
+    let topId: string | undefined;
+    let topCov = 0;
+    let secondCov = 0;
+    for (const [pid, st] of participants) {
+      const w = this.window(st, now, this.shortWindowMs);
+      if (w.samplesCount === 0) continue;
+      const cov = w.speechCount / w.samplesCount;
+      if (cov > topCov) {
+        secondCov = topCov;
+        topCov = cov;
+        topId = pid;
+      } else if (cov > secondCov) {
+        secondCov = cov;
+      }
+    }
+    if (topId && topCov >= 0.5 && secondCov < 0.2) {
+      this.lastSpeakerByMeeting.set(meetingId, topId);
+    }
+  }
+
+  private evaluateEfeitoPosInterrupcao(meetingId: string, now: number): void {
+    const list = this.postInterruptionCandidatesByMeeting.get(meetingId);
+    if (!list || list.length === 0) return;
+    const remaining: Array<{ ts: number; interruptedId: string; valenceBefore?: number }> = [];
+    for (const rec of list) {
+      const age = now - rec.ts;
+      if (age < 6000) {
+        // wait more time to observe effect
+        remaining.push(rec);
+        continue;
+      }
+      if (age > 30000) {
+        // expired
+        continue;
+      }
+      const st = this.byKey.get(this.key(meetingId, rec.interruptedId));
+      if (!st || typeof st.ema.valence !== 'number' || typeof rec.valenceBefore !== 'number') {
+        remaining.push(rec);
+        continue;
+      }
+      const delta = st.ema.valence - rec.valenceBefore;
+      const w = this.window(st, now, this.longWindowMs);
+      const coverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
+      if (delta <= -0.2 && coverage >= 0.2) {
+        const type = 'efeito_pos_interrupcao';
+        if (!this.inCooldown(st, type, now)) {
+          this.setCooldown(st, type, now, 25000);
+          const name = this.index.getParticipantName(meetingId, rec.interruptedId) ?? rec.interruptedId;
+          const payload: FeedbackEventPayload = {
+            id: this.makeId(),
+            type,
+            severity: 'warning',
+            ts: now,
+            meetingId,
+            participantId: rec.interruptedId,
+            window: { start: rec.ts, end: now },
+            message: `${name}: queda de ânimo após interrupção.`,
+            tips: ['Convide a concluir a ideia interrompida', 'Garanta espaço de fala'],
+            metadata: {
+              valenceEMA: st.ema.valence,
+            },
+          };
+          this.delivery.publishToHosts(meetingId, payload);
+        }
+        // do not keep this record further after evaluation
+      } else {
+        remaining.push(rec);
+      }
+    }
+    this.postInterruptionCandidatesByMeeting.set(meetingId, remaining);
+  }
+
+  private evaluateRitmoAceleradoPausado(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    const start = now - this.longWindowMs;
+    const samples = state.samples.filter((s) => s.ts >= start);
+    if (samples.length < 6) return;
+    // compute transitions and segment durations
+    let switches = 0;
+    let speechSegments = 0;
+    let silenceSegments = 0;
+    let longestSilence = 0;
+    let currentIsSpeech: boolean | undefined = undefined;
+    let currentStart = start;
+    let lastTs = start;
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      const segDur = (s.ts - lastTs) / 1000;
+      if (typeof currentIsSpeech === 'boolean') {
+        if (currentIsSpeech) {
+          // speech segment
+        } else {
+          // silence segment
+          if (segDur > longestSilence) longestSilence = segDur;
+        }
+      }
+      if (typeof currentIsSpeech !== 'boolean') {
+        currentIsSpeech = s.speech;
+        currentStart = s.ts;
+        lastTs = s.ts;
+        continue;
+      }
+      if (s.speech !== currentIsSpeech) {
+        switches++;
+        // finalize segment
+        const dur = (s.ts - currentStart) / 1000;
+        if (currentIsSpeech) speechSegments++;
+        else {
+          silenceSegments++;
+          if (dur > longestSilence) longestSilence = dur;
+        }
+        currentIsSpeech = s.speech;
+        currentStart = s.ts;
+      }
+      lastTs = s.ts;
+    }
+    // finalize last segment until now
+    const tailDur = (now - currentStart) / 1000;
+    if (currentIsSpeech) speechSegments++;
+    else {
+      silenceSegments++;
+      if (tailDur > longestSilence) longestSilence = tailDur;
+    }
+    const windowSec = this.longWindowMs / 1000;
+    const switchesPerSec = switches / windowSec;
+    const w = this.window(state, now, this.longWindowMs);
+    const speechCoverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
+
+    // ritmo acelerado
+    if (switchesPerSec >= 1.0 && speechSegments >= 6) {
+      const type = 'ritmo_acelerado';
+      if (!this.inCooldown(state, type, now)) {
+        this.setCooldown(state, type, now, 20000);
+        const severity: 'info' | 'warning' = switchesPerSec >= 1.5 ? 'warning' : 'info';
+        const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+        const payload: FeedbackEventPayload = {
+          id: this.makeId(),
+          type,
+          severity,
+          ts: now,
+          meetingId,
+          participantId,
+          window: { start, end: now },
+          message:
+            severity === 'warning'
+              ? `${name}: ritmo acelerado; desacelere para melhor entendimento.`
+              : `${name}: ritmo rápido; considere pausas curtas.`,
+          tips: ['Faça pausas para respiração', 'Enuncie com clareza'],
+          metadata: {
+            speechCoverage,
+          },
+        };
+        this.delivery.publishToHosts(meetingId, payload);
+      }
+    }
+
+    // ritmo pausado
+    if (longestSilence >= 3.0 || speechCoverage < 0.15) {
+      const type = 'ritmo_pausado';
+      if (!this.inCooldown(state, type, now)) {
+        this.setCooldown(state, type, now, 20000);
+        const severity: 'info' | 'warning' = longestSilence >= 5.0 ? 'warning' : 'info';
+        const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+        const payload: FeedbackEventPayload = {
+          id: this.makeId(),
+          type,
+          severity,
+          ts: now,
+          meetingId,
+          participantId,
+          window: { start, end: now },
+          message:
+            severity === 'warning'
+              ? `${name}: ritmo pausado; evite pausas longas.`
+              : `${name}: ritmo lento; aumente um pouco a cadência.`,
+          tips: ['Reduza pausas longas', 'Mantenha frases mais curtas'],
+          metadata: {
+            speechCoverage,
+          },
+        };
+        this.delivery.publishToHosts(meetingId, payload);
+      }
     }
   }
 
