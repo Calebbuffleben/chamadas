@@ -13,8 +13,8 @@ rtc:
   use_external_ip: true
   # Media over UDP port range (exposed in docker-compose)
   # Reduced range to avoid port conflicts
-  port_range_start: 50000
-  port_range_end: 50100
+  port_range_start: 55000
+  port_range_end: 55100
 
 # Static API keys for development
 # Replace with your own values before exposing publicly

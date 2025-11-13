@@ -14,7 +14,7 @@ services:
     ports:
       - "7880:7880"   # HTTP / WebSocket signaling
       - "7881:7881"   # WebRTC over TCP fallback
-      - "50000-50100:50000-50100/udp" # WebRTC media over UDP
+      - "55000-55100:55000-55100/udp" # WebRTC media over UDP
     volumes:
       - ./livekit.yaml:/app/livekit.yaml:ro
     command: ["--config", "/app/livekit.yaml"]
