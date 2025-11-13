@@ -50,6 +50,11 @@ enum FeedbackType {
   engajamento_baixo
   overlap_fala
   monologo_prolongado
+  frustracao_crescente
+  entusiasmo_alto
+  monotonia_prosodica
+  energia_grupo_baixa
+  interrupcoes_frequentes
 }
 
 model FeedbackEvent {

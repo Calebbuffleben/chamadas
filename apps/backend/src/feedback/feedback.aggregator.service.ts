@@ -28,8 +28,13 @@ export class FeedbackAggregatorService {
   private readonly byKey = new Map<string, ParticipantState>(); // key = meetingId:participantId
   private readonly shortWindowMs = 3000;
   private readonly longWindowMs = 10000;
+  private readonly trendWindowMs = 20000;
   private readonly pruneHorizonMs = 65000;
   private readonly emaAlpha = 0.3;
+  // Meeting-level tracking for interruptions and cooldowns
+  private readonly overlapHistoryByMeeting = new Map<string, number[]>(); // timestamps for overlap detections
+  private readonly lastOverlapSampleAtByMeeting = new Map<string, number>(); // throttle overlap sampling
+  private readonly meetingCooldownByType = new Map<string, number>(); // key=`${meetingId}:${type}` -> until timestamp
 
   constructor(
     private readonly delivery: FeedbackDeliveryService,
@@ -63,6 +68,20 @@ export class FeedbackAggregatorService {
     this.evaluateSilenceProlongado(evt.meetingId, participantId, state, evt.ts);
     // Volume baixo/alto usando RMS (EMA + média de janela curta)
     this.evaluateVolume(evt.meetingId, participantId, state, evt.ts);
+    // Sentimento negativo (valence EMA)
+    this.evaluateTendenciaEmocionalNegativa(evt.meetingId, participantId, state, evt.ts);
+    // Engajamento baixo (arousal EMA)
+    this.evaluateEngajamentoBaixo(evt.meetingId, participantId, state, evt.ts);
+    // Frustração crescente (arousal↑ + valence↓ no período)
+    this.evaluateFrustracaoCrescente(evt.meetingId, participantId, state, evt.ts);
+    // Entusiasmo alto sustentado (arousal alto estável)
+    this.evaluateEntusiasmoAlto(evt.meetingId, participantId, state, evt.ts);
+    // Monotonia prosódica (baixa variância de arousal)
+    this.evaluateMonotoniaProsodica(evt.meetingId, participantId, state, evt.ts);
+    // Queda de energia do grupo (arousal médio baixo entre convidados)
+    this.evaluateEnergiaGrupoBaixa(evt.meetingId, evt.ts);
+    // Interrupções frequentes (contagem de overlaps por minuto)
+    this.evaluateInterrupcoesFrequentes(evt.meetingId, participantId, evt.ts);
     // Overlap de fala (heurística simples por cobertura na janela longa)
     this.evaluateOverlapFala(evt.meetingId, participantId, evt.ts);
     // Monólogo prolongado (60s)
@@ -257,6 +276,359 @@ export class FeedbackAggregatorService {
     }
   }
 
+  // Novas heurísticas baseadas em sentimento/arousal
+  private evaluateTendenciaEmocionalNegativa(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    const val = state.ema.valence;
+    if (typeof val !== 'number') return;
+    // Requer fala razoável na janela longa
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5) return;
+    const speechCoverage = w.speechCount / w.samplesCount;
+    if (speechCoverage < 0.4) return;
+    // Thresholds para valence em [-1,1]
+    const type = 'tendencia_emocional_negativa';
+    if (val <= -0.6 || val <= -0.35) {
+      if (this.inCooldown(state, type, now)) return;
+      const severe = val <= -0.6;
+      this.setCooldown(state, type, now, severe ? 25000 : 20000);
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: severe ? 'warning' : 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: severe
+          ? `${name}: tom negativo perceptível. Considere suavizar a comunicação.`
+          : `${name}: tendência emocional negativa. Tente um tom mais positivo.`,
+        tips: ['Mostre concordância antes de divergir', 'Evite frases muito secas'],
+        metadata: {
+          valenceEMA: val,
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateEngajamentoBaixo(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    const ar = state.ema.arousal;
+    if (typeof ar !== 'number') return;
+    // Requer fala moderada na janela longa
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5) return;
+    const speechCoverage = w.speechCount / w.samplesCount;
+    if (speechCoverage < 0.3) return;
+    // Thresholds para arousal em [-1,1]
+    const type = 'engajamento_baixo';
+    if (ar <= -0.4 || ar <= -0.2) {
+      if (this.inCooldown(state, type, now)) return;
+      const warn = ar <= -0.4;
+      this.setCooldown(state, type, now, warn ? 20000 : 15000);
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: warn ? 'warning' : 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: warn
+          ? `${name}: engajamento baixo (tom desanimado).`
+          : `${name}: energia baixa. Um pouco mais de ênfase pode ajudar.`,
+        tips: ['Fale com mais variação de tom', 'Projete a voz mais próxima do microfone'],
+        metadata: {
+          arousalEMA: ar,
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateFrustracaoCrescente(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    const start = now - this.trendWindowMs;
+    let arousalEarlySum = 0;
+    let arousalEarlyN = 0;
+    let arousalLateSum = 0;
+    let arousalLateN = 0;
+    let valenceEarlySum = 0;
+    let valenceEarlyN = 0;
+    let valenceLateSum = 0;
+    let valenceLateN = 0;
+    let speechN = 0;
+    for (let i = state.samples.length - 1; i >= 0; i--) {
+      const s = state.samples[i];
+      if (s.ts < start) break;
+      if (s.speech) speechN++;
+      if (s.ts < now - this.trendWindowMs / 2) {
+        if (typeof s.arousal === 'number') {
+          arousalEarlySum += s.arousal;
+          arousalEarlyN++;
+        }
+        if (typeof s.valence === 'number') {
+          valenceEarlySum += s.valence;
+          valenceEarlyN++;
+        }
+      } else {
+        if (typeof s.arousal === 'number') {
+          arousalLateSum += s.arousal;
+          arousalLateN++;
+        }
+        if (typeof s.valence === 'number') {
+          valenceLateSum += s.valence;
+          valenceLateN++;
+        }
+      }
+    }
+    const totalN = arousalEarlyN + arousalLateN + valenceEarlyN + valenceLateN;
+    if (speechN < 5 || totalN < 8) return;
+    const arousalEarly = arousalEarlyN > 0 ? arousalEarlySum / arousalEarlyN : undefined;
+    const arousalLate = arousalLateN > 0 ? arousalLateSum / arousalLateN : undefined;
+    const valenceEarly = valenceEarlyN > 0 ? valenceEarlySum / valenceEarlyN : undefined;
+    const valenceLate = valenceLateN > 0 ? valenceLateSum / valenceLateN : undefined;
+    if (typeof arousalEarly !== 'number' || typeof arousalLate !== 'number') return;
+    if (typeof valenceEarly !== 'number' || typeof valenceLate !== 'number') return;
+    const arousalDelta = arousalLate - arousalEarly;
+    const valenceDelta = valenceLate - valenceEarly;
+    if (arousalDelta >= 0.25 && valenceDelta <= -0.2) {
+      const type = 'frustracao_crescente';
+      if (this.inCooldown(state, type, now)) return;
+      this.setCooldown(state, type, now, 25000);
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start, end: now },
+        message: `${name}: indícios de frustração crescente.`,
+        tips: ['Reduza o ritmo e cheque entendimento', 'Valide objeções antes de avançar'],
+        metadata: {
+          arousalEMA: state.ema.arousal,
+          valenceEMA: state.ema.valence,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateEntusiasmoAlto(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    const ar = state.ema.arousal;
+    if (typeof ar !== 'number') return;
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5) return;
+    const speechCoverage = w.speechCount / w.samplesCount;
+    if (speechCoverage < 0.5) return;
+    if (ar >= 0.5) {
+      const type = 'entusiasmo_alto';
+      if (this.inCooldown(state, type, now)) return;
+      const severity: 'info' | 'warning' = ar >= 0.7 ? 'warning' : 'info';
+      this.setCooldown(state, type, now, severity === 'warning' ? 20000 : 15000);
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message:
+          severity === 'warning'
+            ? `${name}: energia muito alta; canalize em próximos passos.`
+            : `${name}: entusiasmo alto; ótimo momento para direcionar ações.`,
+        tips: ['Direcione para decisões e próximos passos'],
+        metadata: {
+          arousalEMA: ar,
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateMonotoniaProsodica(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    const start = now - this.longWindowMs;
+    const values: number[] = [];
+    let speechN = 0;
+    for (let i = state.samples.length - 1; i >= 0; i--) {
+      const s = state.samples[i];
+      if (s.ts < start) break;
+      if (s.speech) speechN++;
+      if (typeof s.arousal === 'number') values.push(s.arousal);
+    }
+    if (speechN < 5 || values.length < 5) return;
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const variance = values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / values.length;
+    const stdev = Math.sqrt(variance);
+    const type = 'monotonia_prosodica';
+    if (stdev < 0.1) {
+      if (this.inCooldown(state, type, now)) return;
+      const severity: 'info' | 'warning' = stdev < 0.06 ? 'warning' : 'info';
+      this.setCooldown(state, type, now, 20000);
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start, end: now },
+        message:
+          severity === 'warning'
+            ? `${name}: fala monótona; varie entonação e pausas.`
+            : `${name}: pouca variação de entonação.`,
+        tips: ['Use pausas e ênfases para destacar pontos'],
+        metadata: {
+          arousalEMA: state.ema.arousal,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateEnergiaGrupoBaixa(meetingId: string, now: number): void {
+    const participants = this.participantsForMeeting(meetingId);
+    if (participants.length === 0) return;
+    let sum = 0;
+    let n = 0;
+    for (const [pid, st] of participants) {
+      // ignore host if role is host
+      const role = this.index.getParticipantRole(meetingId, pid);
+      if (role === 'host') continue;
+      const w = this.window(st, now, this.longWindowMs);
+      if (w.samplesCount === 0) continue;
+      const coverage = w.speechCount / w.samplesCount;
+      if (coverage < 0.3) continue;
+      if (typeof st.ema.arousal === 'number') {
+        sum += st.ema.arousal;
+        n++;
+      }
+    }
+    if (n === 0) return;
+    const mean = sum / n;
+    if (mean <= -0.3) {
+      const type = 'energia_grupo_baixa';
+      if (this.inCooldownMeeting(meetingId, type, now)) return;
+      const severity: 'info' | 'warning' = mean <= -0.5 ? 'warning' : 'info';
+      this.setCooldownMeeting(meetingId, type, now, 30000);
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId: 'group',
+        window: { start: now - this.longWindowMs, end: now },
+        message:
+          severity === 'warning'
+            ? `Energia do grupo baixa. Considere perguntas diretas ou mudança de dinâmica.`
+            : `Energia do grupo em queda. Estimule participação.`,
+        tips: ['Convide pessoas específicas a opinar', 'Introduza uma pergunta aberta'],
+        metadata: {
+          arousalEMA: mean,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateInterrupcoesFrequentes(meetingId: string, participantId: string, now: number): void {
+    const participants = this.participantsForMeeting(meetingId);
+    if (participants.length < 2) return;
+    // Determine if there is overlap in the short window
+    let speakingCount = 0;
+    const covers: Array<{ id: string; coverage: number }> = [];
+    for (const [pid, st] of participants) {
+      const w = this.window(st, now, this.shortWindowMs);
+      if (w.samplesCount === 0) continue;
+      const coverage = w.speechCount / w.samplesCount;
+      covers.push({ id: pid, coverage });
+      if (coverage >= 0.2) speakingCount++;
+    }
+    const keyThrottle = meetingId;
+    if (speakingCount >= 2) {
+      const lastAt = this.lastOverlapSampleAtByMeeting.get(keyThrottle) ?? 0;
+      if (now - lastAt >= 2000) {
+        this.lastOverlapSampleAtByMeeting.set(keyThrottle, now);
+        const arr = this.overlapHistoryByMeeting.get(meetingId) ?? [];
+        arr.push(now);
+        // prune older than 60s
+        const cutoff = now - 60000;
+        while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+        this.overlapHistoryByMeeting.set(meetingId, arr);
+      }
+    }
+    const arr = this.overlapHistoryByMeeting.get(meetingId) ?? [];
+    if (arr.length >= 5) {
+      const type = 'interrupcoes_frequentes';
+      if (this.inCooldownMeeting(meetingId, type, now)) return;
+      this.setCooldownMeeting(meetingId, type, now, 30000);
+      // identify top two speakers in long window to reference
+      const longCovers = covers
+        .map((c) => {
+          const st = participants.find(([pid]) => pid === c.id)?.[1];
+          if (!st) return { id: c.id, coverage: 0 };
+          const w = this.window(st, now, this.longWindowMs);
+          const cov = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
+          return { id: c.id, coverage: cov };
+        })
+        .sort((a, b) => b.coverage - a.coverage)
+        .slice(0, 2);
+      const names = longCovers
+        .map((x) => this.index.getParticipantName(meetingId, x.id) ?? x.id)
+        .filter(Boolean);
+      const who = names.length > 0 ? ` (${names.join(' , ')})` : '';
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId: 'group',
+        window: { start: now - 60000, end: now },
+        message: `Interrupções frequentes nos últimos 60s${who}. Combine turnos de fala.`,
+        tips: ['Use levantar a mão', 'Defina ordem de fala'],
+        metadata: {},
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+      // reset history after firing to avoid immediate re-triggers
+      this.overlapHistoryByMeeting.set(meetingId, []);
+    }
+  }
+
   // Helpers
   private window(
     state: ParticipantState,
@@ -351,6 +723,17 @@ export class FeedbackAggregatorService {
       }
     }
     return out;
+  }
+
+  private inCooldownMeeting(meetingId: string, type: string, now: number): boolean {
+    const key = `${meetingId}:${type}`;
+    const until = this.meetingCooldownByType.get(key);
+    return typeof until === 'number' && until > now;
+  }
+
+  private setCooldownMeeting(meetingId: string, type: string, now: number, ms: number): void {
+    const key = `${meetingId}:${type}`;
+    this.meetingCooldownByType.set(key, now + ms);
   }
 
   // Debug/introspection

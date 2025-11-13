@@ -46,7 +46,12 @@ export interface FeedbackEventPayload {
     | 'tendencia_emocional_negativa'
     | 'engajamento_baixo'
     | 'overlap_fala'
-    | 'monologo_prolongado';
+    | 'monologo_prolongado'
+    | 'frustracao_crescente'
+    | 'entusiasmo_alto'
+    | 'monotonia_prosodica'
+    | 'energia_grupo_baixa'
+    | 'interrupcoes_frequentes';
   severity: FeedbackSeverity;
   ts: number;
   meetingId: string;

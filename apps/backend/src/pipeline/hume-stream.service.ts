@@ -208,6 +208,8 @@ export class HumeStreamService implements OnModuleDestroy {
             if (warnings.includes('W0105')) {
               speechDetected = false;
             }
+            // Try to extract valence/arousal from prosody block (or entire payload as fallback)
+            const { valence, arousal } = this.extractValenceArousal(prosody) ?? this.extractValenceArousal(anyObj);
             const [meetingId, participant, track] = this.parseKey(key);
             const participantRole = this.participantIndex.getParticipantRole(
               meetingId,
@@ -223,6 +225,8 @@ export class HumeStreamService implements OnModuleDestroy {
               ts: Date.now(),
               prosody: {
                 speechDetected,
+                valence,
+                arousal,
                 warnings,
               },
               debug: {
@@ -313,6 +317,50 @@ export class HumeStreamService implements OnModuleDestroy {
     const dbfs = 20 * Math.log10(rms);
     // Clamp to a floor to avoid -Infinity downstream
     return Math.max(-100, Math.min(0, dbfs));
+  }
+
+  /**
+   * Recursively searches an object/array for numeric 'valence' and 'arousal' keys.
+   * Returns clamped values in [-1, 1] if found.
+   */
+  private extractValenceArousal(input: unknown): { valence?: number; arousal?: number } {
+    let foundValence: number | undefined;
+    let foundArousal: number | undefined;
+    const seen = new Set<unknown>();
+    const visit = (node: unknown): void => {
+      if (node === null || node === undefined) return;
+      if (typeof node !== 'object') return;
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          if (foundValence !== undefined && foundArousal !== undefined) return;
+          visit(item);
+        }
+        return;
+      }
+      const rec = node as Record<string, unknown>;
+      for (const [k, v] of Object.entries(rec)) {
+        const key = k.toLowerCase();
+        if ((key === 'valence' || key.endsWith('_valence')) && typeof v === 'number') {
+          foundValence = this.clampMinus1To1(v);
+        } else if ((key === 'arousal' || key.endsWith('_arousal')) && typeof v === 'number') {
+          foundArousal = this.clampMinus1To1(v);
+        } else if (typeof v === 'object' && v !== null) {
+          if (foundValence !== undefined && foundArousal !== undefined) break;
+          visit(v);
+        }
+      }
+    };
+    visit(input);
+    return { valence: foundValence, arousal: foundArousal };
+  }
+
+  private clampMinus1To1(v: number): number {
+    if (!Number.isFinite(v)) return v;
+    if (v < -1) return -1;
+    if (v > 1) return 1;
+    return v;
   }
 
   onModuleDestroy(): void {
