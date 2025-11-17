@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { AppWebSocketGateway } from '../websocket/websocket.gateway';
 import { FeedbackEventPayload } from './feedback.types';
 import { FeedbackRepository } from './feedback.repository';
+import { SessionsService } from '../sessions/sessions.service';
 
 @Injectable()
 export class FeedbackDeliveryService {
@@ -17,6 +18,7 @@ export class FeedbackDeliveryService {
   constructor(
     private readonly wsGateway: AppWebSocketGateway,
     private readonly repo: FeedbackRepository,
+    private readonly sessionsService: SessionsService,
   ) {}
 
   publishToHosts(meetingId: string, payload: FeedbackEventPayload): void {
@@ -30,7 +32,7 @@ export class FeedbackDeliveryService {
       );
     } catch {}
     this.wsGateway.server.to(room).emit('feedback', payload);
-    void this.repo.saveEvent(payload);
+    void this.persist(meetingId, payload);
     this.recordMetrics(meetingId, payload);
   }
 
@@ -45,7 +47,8 @@ export class FeedbackDeliveryService {
     const countsObj: Record<string, number> = {};
     for (const [k, v] of m.counts.entries()) countsObj[k] = v;
     const samples = m.latencies.length;
-    const latencyAvgMs = samples > 0 ? Math.round(m.latencies.reduce((a, b) => a + b, 0) / samples) : undefined;
+    const latencyAvgMs =
+      samples > 0 ? Math.round(m.latencies.reduce((a, b) => a + b, 0) / samples) : undefined;
     return { meetingId, counts: countsObj, latencyAvgMs, samples };
   }
 
@@ -60,6 +63,17 @@ export class FeedbackDeliveryService {
     m.latencies.push(latency);
     if (m.latencies.length > m.maxSamples) {
       m.latencies.splice(0, m.latencies.length - m.maxSamples);
+    }
+  }
+
+  private async persist(meetingId: string, payload: FeedbackEventPayload): Promise<void> {
+    try {
+      const organizationId =
+        (await this.sessionsService.getOrganizationIdByMeetingId(meetingId)) ?? undefined;
+      await this.repo.saveEvent(payload, organizationId);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('[FeedbackDelivery] failed to persist feedback event', error);
     }
   }
 }

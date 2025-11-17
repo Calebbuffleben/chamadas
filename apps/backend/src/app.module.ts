@@ -8,6 +8,11 @@ import { SessionsModule } from './sessions/sessions.module';
 import { LiveKitWebhookModule } from './livekit/livekit-webhook.module';
 import { AudioPipelineModule } from './pipeline/audio-pipeline.module';
 import { FeedbackModule } from './feedback/feedback.module';
+import { UsersModule } from './users/users.module';
+import { OrganizationsModule } from './organizations/organizations.module';
+import { AuthModule } from './auth/auth.module';
+import { MeetingsModule } from './meetings/meetings.module';
+import { RolesGuard } from './common/guards/roles.guard';
 
 @Module({
   imports: [
@@ -19,8 +24,12 @@ import { FeedbackModule } from './feedback/feedback.module';
     AudioPipelineModule,
     WebSocketModule,
     FeedbackModule,
+    UsersModule,
+    OrganizationsModule,
+    AuthModule,
+    MeetingsModule,
   ],
   controllers: [AppController],
-  providers: [],
+  providers: [RolesGuard],
 })
 export class AppModule {}

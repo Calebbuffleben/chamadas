@@ -11,12 +11,100 @@ datasource db {
 }
 
 // Example model - you can add your own models here
+enum UserStatus {
+  active
+  invited
+  suspended
+}
+
+enum OrganizationRole {
+  owner
+  admin
+  host
+  member
+}
+
 model User {
+  id           String                  @id @default(uuid())
+  email        String
+  passwordHash String
+  name         String?
+  status       UserStatus              @default(active)
+  lastLoginAt  DateTime?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+
+  memberships  OrganizationMembership[]
+  refreshTokens RefreshToken[]
+  createdInvitations OrganizationInvitation[] @relation("InvitationCreator")
+  acceptedInvitations OrganizationInvitation[] @relation("InvitationRecipient")
+
+  @@index([email])
+}
+
+model Organization {
   id        String   @id @default(uuid())
-  email     String   @unique
-  name      String?
+  slug      String   @unique
+  name      String
+  plan      String?  @default("standard")
+  metadata  Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  memberships OrganizationMembership[]
+  secrets     OrganizationSecret[]
+  refreshTokens RefreshToken[]
+  sessions    Session[]
+  feedback    FeedbackEvent[]
+  invitations OrganizationInvitation[]
+}
+
+model OrganizationMembership {
+  id             String           @id @default(uuid())
+  organizationId String
+  userId         String
+  role           OrganizationRole @default(member)
+  isDefault      Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+model OrganizationSecret {
+  id             String   @id @default(uuid())
+  organizationId String
+  livekitUrl     String
+  livekitApiKey  String
+  livekitApiSecret String
+  allowedRegions String[] @default([])
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId])
+}
+
+model RefreshToken {
+  id             String   @id @default(uuid())
+  userId         String
+  organizationId String
+  tokenHash      String
+  userAgent      String?
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([userId])
+  @@index([organizationId])
 }
 
 enum SessionStatus {
@@ -25,15 +113,19 @@ enum SessionStatus {
 }
 
 model Session {
-  id         String         @id @default(uuid())
-  meetingId  String         @unique
-  roomSid    String?        @unique
-  roomName   String
-  status     SessionStatus  @default(ACTIVE)
-  startedAt  DateTime       @default(now())
-  endedAt    DateTime?
+  id             String         @id @default(uuid())
+  meetingId      String         @unique
+  roomSid        String?        @unique
+  roomName       String
+  status         SessionStatus  @default(ACTIVE)
+  startedAt      DateTime       @default(now())
+  endedAt        DateTime?
+  organizationId String?
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
 
   @@index([roomName])
+  @@index([organizationId])
 }
 
 enum FeedbackSeverity {
@@ -74,8 +166,40 @@ model FeedbackEvent {
   metadata       Json
   createdAt      DateTime          @default(now())
   expiresAt      DateTime?
+  organizationId String?
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
 
   @@index([meetingId, ts])
   @@index([expiresAt])
+  @@index([organizationId, meetingId])
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  revoked
+  expired
+}
+
+model OrganizationInvitation {
+  id               String           @id @default(uuid())
+  organizationId   String
+  email            String
+  role             OrganizationRole @default(member)
+  tokenHash        String           @unique
+  status           InvitationStatus @default(pending)
+  expiresAt        DateTime
+  createdAt        DateTime         @default(now())
+  createdByUserId  String
+  acceptedAt       DateTime?
+  invitedUserId    String?
+
+  organization     Organization     @relation(fields: [organizationId], references: [id])
+  createdBy        User             @relation("InvitationCreator", fields: [createdByUserId], references: [id])
+  invitedUser      User?            @relation("InvitationRecipient", fields: [invitedUserId], references: [id])
+
+  @@index([organizationId, status])
+  @@index([email])
 }
 

@@ -353,6 +353,22 @@ webhook:
 - `GET /` - Status da API
 - `GET /health` - Health check
 - `POST /livekit/webhook` - Webhook do LiveKit para gerenciamento de sessões
+- `POST /auth/register` - Cria uma nova organização + usuário (owner)
+- `POST /auth/login` - Retorna par de tokens (access + refresh) para uma organização existente
+- `POST /auth/refresh` - Rotaciona o refresh token e retorna novo par de tokens
+- `POST /auth/logout` - Revoga o refresh token informado
+- `GET /auth/me` - Retorna o perfil do usuário autenticado (requer bearer token)
+
+### Variáveis de ambiente de autenticação
+
+| Nome               | Descrição                                                | Default dev |
+| ------------------ | -------------------------------------------------------- | ----------- |
+| `JWT_ACCESS_SECRET`  | Segredo usado para assinar o access token                | `dev-access-secret` |
+| `JWT_REFRESH_SECRET` | Segredo usado para assinar o refresh token               | `dev-refresh-secret` |
+| `JWT_ACCESS_TTL`     | Tempo em segundos do access token (ex.: `900` = 15 min) | `900` |
+| `JWT_REFRESH_TTL`    | Tempo em segundos do refresh token (ex.: `2592000` = 30 dias) | `2592000` |
+
+> Rode `pnpm prisma:migrate` após configurar as variáveis para aplicar as novas tabelas (`Organization`, `OrganizationMembership`, `RefreshToken`, etc.).
 
 ## Estrutura de Armazenamento
 
@@ -376,7 +392,7 @@ storage/
 - [x] Integração com Hume (streaming WebSocket)
 - [x] Gerenciamento de sessões via webhook
 - [x] Associação automática de streams com sessões
-- [ ] Adicionar autenticação (JWT) para endpoints
+- [x] Adicionar autenticação (JWT) para endpoints
 - [ ] Implementar validação de dados mais robusta
 - [ ] Adicionar testes automatizados
 - [ ] Suporte a compressão Opus opcional

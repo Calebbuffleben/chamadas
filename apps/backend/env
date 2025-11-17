@@ -33,3 +33,9 @@ HUME_API_KEY=
 # Node Environment
 NODE_ENV=development
 
+# Auth
+JWT_ACCESS_SECRET=dev-access-secret
+JWT_REFRESH_SECRET=dev-refresh-secret
+JWT_ACCESS_TTL=900
+JWT_REFRESH_TTL=2592000
+

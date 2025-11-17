@@ -82,7 +82,9 @@ export class HumeStreamService implements OnModuleDestroy {
       };
       this.emitter.emit('feedback.ingestion', evt);
     } catch (e) {
-      this.logger.warn(`[Hume][RMS] failed to compute rms: ${e instanceof Error ? e.message : String(e)}`);
+      this.logger.warn(
+        `[Hume][RMS] failed to compute rms: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
     // Always include models with each data payload to satisfy Hume's "models configured" requirement
     const payload = this.buildDataPayload(wavChunk);
@@ -209,7 +211,8 @@ export class HumeStreamService implements OnModuleDestroy {
               speechDetected = false;
             }
             // Try to extract valence/arousal from prosody block (or entire payload as fallback)
-            const { valence, arousal } = this.extractValenceArousal(prosody) ?? this.extractValenceArousal(anyObj);
+            const { valence, arousal } =
+              this.extractValenceArousal(prosody) ?? this.extractValenceArousal(anyObj);
             const [meetingId, participant, track] = this.parseKey(key);
             const participantRole = this.participantIndex.getParticipantRole(
               meetingId,

@@ -6,9 +6,10 @@ import { LiveKitWebhookModule } from '../livekit/livekit-webhook.module';
 import { FeedbackController } from './feedback.controller';
 import { PrismaModule } from '../prisma/prisma.module';
 import { FeedbackRepository } from './feedback.repository';
+import { SessionsModule } from '../sessions/sessions.module';
 
 @Module({
-  imports: [WebSocketModule, LiveKitWebhookModule, PrismaModule],
+  imports: [WebSocketModule, LiveKitWebhookModule, PrismaModule, SessionsModule],
   controllers: [FeedbackController],
   providers: [FeedbackAggregatorService, FeedbackDeliveryService, FeedbackRepository],
   exports: [FeedbackAggregatorService, FeedbackDeliveryService],

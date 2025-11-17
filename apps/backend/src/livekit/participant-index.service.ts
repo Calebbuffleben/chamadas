@@ -43,11 +43,17 @@ export class ParticipantIndexService {
     return 'guest';
   }
 
-  setParticipantNameFromMetadata(meetingId: string, participantIdentity: string, metadata: string | undefined): void {
+  setParticipantNameFromMetadata(
+    meetingId: string,
+    participantIdentity: string,
+    metadata: string | undefined,
+  ): void {
     const maps = this.getOrCreate(meetingId);
     const name = this.parseName(metadata) ?? participantIdentity;
     maps.participantToName.set(participantIdentity, name);
-    this.logger.log(`[Name] meeting=${meetingId} participant=${participantIdentity} name="${name}"`);
+    this.logger.log(
+      `[Name] meeting=${meetingId} participant=${participantIdentity} name="${name}"`,
+    );
   }
 
   getParticipantName(meetingId: string, participantIdentity: string): string | undefined {

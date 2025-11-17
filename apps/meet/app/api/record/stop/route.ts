@@ -1,16 +1,17 @@
 import { EgressClient } from 'livekit-server-sdk';
 import { NextRequest, NextResponse } from 'next/server';
 
+const ALLOWED_ROLES = new Set(['owner', 'admin', 'host']);
+
 export async function GET(req: NextRequest) {
   try {
-    const roomName = req.nextUrl.searchParams.get('roomName');
+    const authHeader = req.headers.get('authorization');
+    if (!authHeader) {
+      return new NextResponse('Unauthorized', { status: 401 });
+    }
+    await authorizeRequest(authHeader);
 
-    /**
-     * CAUTION:
-     * for simplicity this implementation does not authenticate users and therefore allows anyone with knowledge of a roomName
-     * to start/stop recordings for that room.
-     * DO NOT USE THIS FOR PRODUCTION PURPOSES AS IS
-     */
+    const roomName = req.nextUrl.searchParams.get('roomName');
 
     if (roomName === null) {
       return new NextResponse('Missing roomName parameter', { status: 403 });
@@ -35,5 +36,28 @@ export async function GET(req: NextRequest) {
     if (error instanceof Error) {
       return new NextResponse(error.message, { status: 500 });
     }
+  }
+}
+
+async function authorizeRequest(authorization: string): Promise<void> {
+  const backendUrl = process.env.BACKEND_URL;
+  if (!backendUrl) {
+    throw new Error('BACKEND_URL is not configured');
+  }
+  const res = await fetch(`${backendUrl}/auth/me`, {
+    headers: {
+      Authorization: authorization,
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    throw new Error('Unauthorized');
+  }
+  const data = (await res.json()) as {
+    membership?: { role?: string | null };
+  };
+  const role = data.membership?.role?.toLowerCase();
+  if (!role || !ALLOWED_ROLES.has(role)) {
+    throw new Error('Forbidden');
   }
 }

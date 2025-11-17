@@ -133,7 +133,12 @@ export class FeedbackAggregatorService {
     }
   }
 
-  private evaluateVolume(meetingId: string, participantId: string, state: ParticipantState, now: number): void {
+  private evaluateVolume(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
     const w = this.window(state, now, this.shortWindowMs);
     if (w.samplesCount < 1) return;
     const speechCoverage = w.speechCount / w.samplesCount;
@@ -162,7 +167,10 @@ export class FeedbackAggregatorService {
             severity === 'critical'
               ? `${name}: quase inaudível; aumente o ganho imediatamente.`
               : `${name}: volume baixo; aproxime-se do microfone.`,
-          tips: severity === 'critical' ? ['Aumente o ganho de entrada', 'Aproxime-se do microfone'] : ['Verifique entrada de áudio', 'Desative redução agressiva de ruído'],
+          tips:
+            severity === 'critical'
+              ? ['Aumente o ganho de entrada', 'Aproxime-se do microfone']
+              : ['Verifique entrada de áudio', 'Desative redução agressiva de ruído'],
           metadata: {
             rmsDbfs: level,
             speechCoverage,
@@ -218,7 +226,8 @@ export class FeedbackAggregatorService {
     if (speaking.length >= 2) {
       // Dispara no contexto do participante atual (se estiver entre os que falam), senão no mais recente dos que falam
       const target =
-        speaking.find((s) => s.id === participantId) ?? speaking.sort((a, b) => b.coverage - a.coverage)[0];
+        speaking.find((s) => s.id === participantId) ??
+        speaking.sort((a, b) => b.coverage - a.coverage)[0];
       const type = 'overlap_fala';
       if (this.inCooldown(target.state, type, now)) return;
       this.setCooldown(target.state, type, now, 15000); // 15s
@@ -578,7 +587,11 @@ export class FeedbackAggregatorService {
     }
   }
 
-  private evaluateInterrupcoesFrequentes(meetingId: string, participantId: string, now: number): void {
+  private evaluateInterrupcoesFrequentes(
+    meetingId: string,
+    participantId: string,
+    now: number,
+  ): void {
     const participants = this.participantsForMeeting(meetingId);
     if (participants.length < 2) return;
     // Determine if there is overlap in the short window
@@ -689,7 +702,10 @@ export class FeedbackAggregatorService {
         participantId: 'group',
         window: { start: now - this.longWindowMs, end: now },
         message: `Polarização emocional no grupo (opiniões muito divergentes).`,
-        tips: ['Reconheça pontos de ambos os lados', 'Estabeleça objetivos comuns antes de decidir'],
+        tips: [
+          'Reconheça pontos de ambos os lados',
+          'Estabeleça objetivos comuns antes de decidir',
+        ],
         metadata: {
           valenceEMA: Number(((posMean + negMean) / 2).toFixed(3)),
         },
@@ -748,7 +764,8 @@ export class FeedbackAggregatorService {
         const type = 'efeito_pos_interrupcao';
         if (!this.inCooldown(st, type, now)) {
           this.setCooldown(st, type, now, 25000);
-          const name = this.index.getParticipantName(meetingId, rec.interruptedId) ?? rec.interruptedId;
+          const name =
+            this.index.getParticipantName(meetingId, rec.interruptedId) ?? rec.interruptedId;
           const payload: FeedbackEventPayload = {
             id: this.makeId(),
             type,
@@ -785,7 +802,6 @@ export class FeedbackAggregatorService {
     // compute transitions and segment durations
     let switches = 0;
     let speechSegments = 0;
-    let silenceSegments = 0;
     let longestSilence = 0;
     let currentIsSpeech: boolean | undefined = undefined;
     let currentStart = start;
@@ -812,9 +828,8 @@ export class FeedbackAggregatorService {
         // finalize segment
         const dur = (s.ts - currentStart) / 1000;
         if (currentIsSpeech) speechSegments++;
-        else {
-          silenceSegments++;
-          if (dur > longestSilence) longestSilence = dur;
+        else if (dur > longestSilence) {
+          longestSilence = dur;
         }
         currentIsSpeech = s.speech;
         currentStart = s.ts;
@@ -824,9 +839,8 @@ export class FeedbackAggregatorService {
     // finalize last segment until now
     const tailDur = (now - currentStart) / 1000;
     if (currentIsSpeech) speechSegments++;
-    else {
-      silenceSegments++;
-      if (tailDur > longestSilence) longestSilence = tailDur;
+    else if (tailDur > longestSilence) {
+      longestSilence = tailDur;
     }
     const windowSec = this.longWindowMs / 1000;
     const switchesPerSec = switches / windowSec;
