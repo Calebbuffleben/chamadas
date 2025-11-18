@@ -12,6 +12,7 @@ import { UsersModule } from './users/users.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { AuthModule } from './auth/auth.module';
 import { MeetingsModule } from './meetings/meetings.module';
+import { RecordingsModule } from './recordings/recordings.module';
 import { RolesGuard } from './common/guards/roles.guard';
 
 @Module({
@@ -28,6 +29,7 @@ import { RolesGuard } from './common/guards/roles.guard';
     OrganizationsModule,
     AuthModule,
     MeetingsModule,
+    RecordingsModule,
   ],
   controllers: [AppController],
   providers: [RolesGuard],

@@ -1,201 +1,148 @@
 'use client';
 
-import { useRouter, useSearchParams } from 'next/navigation';
-import React, { Suspense, useState } from 'react';
-import { encodePassphrase, generateRoomId, randomString } from '@/lib/client-utils';
-import styles from '../styles/Home.module.css';
-
-function Tabs(props: React.PropsWithChildren<{}>) {
-  const searchParams = useSearchParams();
-  const tabIndex = searchParams?.get('tab') === 'custom' ? 1 : 0;
-
-  const router = useRouter();
-  function onTabSelected(index: number) {
-    const tab = index === 1 ? 'custom' : 'demo';
-    router.push(`/?tab=${tab}`);
-  }
-
-  let tabs = React.Children.map(props.children, (child, index) => {
-    return (
-      <button
-        className="lk-button"
-        onClick={() => {
-          if (onTabSelected) {
-            onTabSelected(index);
-          }
-        }}
-        aria-pressed={tabIndex === index}
-      >
-        {/* @ts-ignore */}
-        {child?.props.label}
-      </button>
-    );
-  });
-
-  return (
-    <div className={styles.tabContainer}>
-      <div className={styles.tabSelect}>{tabs}</div>
-      {/* @ts-ignore */}
-      {props.children[tabIndex]}
-    </div>
-  );
-}
-
-function DemoMeetingTab(props: { label: string }) {
-  const router = useRouter();
-  const [e2ee, setE2ee] = useState(false);
-  const [sharedPassphrase, setSharedPassphrase] = useState(randomString(64));
-  const startMeeting = () => {
-    if (e2ee) {
-      router.push(`/rooms/${generateRoomId()}#${encodePassphrase(sharedPassphrase)}`);
-    } else {
-      router.push(`/rooms/${generateRoomId()}`);
-    }
-  };
-  return (
-    <div className={styles.tabContent}>
-      <p style={{ margin: 0 }}>Try LiveKit Meet for free with our live demo project.</p>
-      <button style={{ marginTop: '1rem' }} className="lk-button" onClick={startMeeting}>
-        Start Meeting
-      </button>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        <div style={{ display: 'flex', flexDirection: 'row', gap: '1rem' }}>
-          <input
-            id="use-e2ee"
-            type="checkbox"
-            checked={e2ee}
-            onChange={(ev) => setE2ee(ev.target.checked)}
-          ></input>
-          <label htmlFor="use-e2ee">Enable end-to-end encryption</label>
-        </div>
-        {e2ee && (
-          <div style={{ display: 'flex', flexDirection: 'row', gap: '1rem' }}>
-            <label htmlFor="passphrase">Passphrase</label>
-            <input
-              id="passphrase"
-              type="password"
-              value={sharedPassphrase}
-              onChange={(ev) => setSharedPassphrase(ev.target.value)}
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CustomConnectionTab(props: { label: string }) {
-  const router = useRouter();
-
-  const [e2ee, setE2ee] = useState(false);
-  const [sharedPassphrase, setSharedPassphrase] = useState(randomString(64));
-
-  const onSubmit: React.FormEventHandler<HTMLFormElement> = (event) => {
-    event.preventDefault();
-    const formData = new FormData(event.target as HTMLFormElement);
-    const serverUrl = formData.get('serverUrl');
-    const token = formData.get('token');
-    if (e2ee) {
-      router.push(
-        `/custom/?liveKitUrl=${serverUrl}&token=${token}#${encodePassphrase(sharedPassphrase)}`,
-      );
-    } else {
-      router.push(`/custom/?liveKitUrl=${serverUrl}&token=${token}`);
-    }
-  };
-  return (
-    <form className={styles.tabContent} onSubmit={onSubmit}>
-      <p style={{ marginTop: 0 }}>
-        Connect LiveKit Meet with a custom server using LiveKit Cloud or LiveKit Server.
-      </p>
-      <input
-        id="serverUrl"
-        name="serverUrl"
-        type="url"
-        placeholder="LiveKit Server URL: wss://*.livekit.cloud"
-        required
-      />
-      <textarea
-        id="token"
-        name="token"
-        placeholder="Token"
-        required
-        rows={5}
-        style={{ padding: '1px 2px', fontSize: 'inherit', lineHeight: 'inherit' }}
-      />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        <div style={{ display: 'flex', flexDirection: 'row', gap: '1rem' }}>
-          <input
-            id="use-e2ee"
-            type="checkbox"
-            checked={e2ee}
-            onChange={(ev) => setE2ee(ev.target.checked)}
-          ></input>
-          <label htmlFor="use-e2ee">Enable end-to-end encryption</label>
-        </div>
-        {e2ee && (
-          <div style={{ display: 'flex', flexDirection: 'row', gap: '1rem' }}>
-            <label htmlFor="passphrase">Passphrase</label>
-            <input
-              id="passphrase"
-              type="password"
-              value={sharedPassphrase}
-              onChange={(ev) => setSharedPassphrase(ev.target.value)}
-            />
-          </div>
-        )}
-      </div>
-
-      <hr
-        style={{ width: '100%', borderColor: 'rgba(255, 255, 255, 0.15)', marginBlock: '1rem' }}
-      />
-      <button
-        style={{ paddingInline: '1.25rem', width: '100%' }}
-        className="lk-button"
-        type="submit"
-      >
-        Connect
-      </button>
-    </form>
-  );
-}
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { generateRoomId } from '@/lib/client-utils';
+import { useAuth } from '@/lib/auth';
 
 export default function Page() {
-  return (
-    <>
-      <main className={styles.main} data-lk-theme="default">
-        <div className="header">
-          <img src="/images/livekit-meet-home.svg" alt="LiveKit Meet" width="360" height="45" />
-          <h2>
-            Open source video conferencing app built on{' '}
-            <a href="https://github.com/livekit/components-js?ref=meet" rel="noopener">
-              LiveKit&nbsp;Components
-            </a>
-            ,{' '}
-            <a href="https://livekit.io/cloud?ref=meet" rel="noopener">
-              LiveKit&nbsp;Cloud
-            </a>{' '}
-            and Next.js.
-          </h2>
-        </div>
-        <Suspense fallback="Loading">
-          <Tabs>
-            <DemoMeetingTab label="Demo" />
-            <CustomConnectionTab label="Custom" />
-          </Tabs>
-        </Suspense>
+  const { session, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <main data-lk-theme="default" style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <p>Carregando...</p>
       </main>
-      <footer data-lk-theme="default">
-        Hosted on{' '}
-        <a href="https://livekit.io/cloud?ref=meet" rel="noopener">
-          LiveKit Cloud
-        </a>
-        . Source code on{' '}
-        <a href="https://github.com/livekit/meet?ref=meet" rel="noopener">
-          GitHub
-        </a>
-        .
-      </footer>
-    </>
+    );
+  }
+
+  if (!session) {
+    return (
+      <main data-lk-theme="default" style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <div className="lk-card" style={{ padding: '2rem', textAlign: 'center', maxWidth: 420 }}>
+          <h1>Live Meeting</h1>
+          <p>Faça login ou crie uma conta para iniciar reuniões com sua organização.</p>
+          <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', marginTop: '1rem' }}>
+            <a className="lk-button" href="/login">
+              Entrar
+            </a>
+            <a className="lk-button lk-button-secondary" href="/register">
+              Criar conta
+            </a>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  return <AuthenticatedDashboard />;
+}
+
+function AuthenticatedDashboard() {
+  const router = useRouter();
+  const { session, selectOrganization } = useAuth();
+  const [meetingId, setMeetingId] = useState(generateRoomId());
+  const [switchingOrgId, setSwitchingOrgId] = useState<string | null>(null);
+
+  if (!session) {
+    return null;
+  }
+
+  const handleStart = () => {
+    if (!meetingId) {
+      return;
+    }
+    router.push(`/rooms/${meetingId}`);
+  };
+
+  const handleSwitch = async (membershipId: string) => {
+    setSwitchingOrgId(membershipId);
+    try {
+      await selectOrganization(membershipId);
+    } finally {
+      setSwitchingOrgId(null);
+    }
+  };
+
+  const activeOrg =
+    session.organizations.find((org) => org.organizationId === session.currentOrganizationId) ??
+    session.organizations[0];
+
+  return (
+    <main data-lk-theme="default" style={{ minHeight: '100vh', padding: '2rem' }}>
+      <section style={{ maxWidth: 720, margin: '0 auto' }}>
+        <header style={{ marginBottom: '2rem' }}>
+          <h1 style={{ marginBottom: '0.25rem' }}>Olá, {session.user.name ?? session.user.email}</h1>
+          <p>Organização ativa: {activeOrg?.name ?? session.user.organization.name}</p>
+        </header>
+
+        <div className="lk-card" style={{ padding: '1.5rem' }}>
+          <h2 style={{ marginTop: 0 }}>Iniciar uma reunião</h2>
+          <p>Defina um identificador único para convidar outras pessoas.</p>
+          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+            <input
+              className="lk-field-input"
+              value={meetingId}
+              onChange={(event) => setMeetingId(event.target.value)}
+              style={{ flex: 1, minWidth: 200 }}
+            />
+            <button className="lk-button" onClick={handleStart}>
+              Entrar na sala
+            </button>
+          </div>
+        </div>
+
+        <section style={{ marginTop: '2rem' }}>
+          <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h3 style={{ marginBottom: 0 }}>Organizações</h3>
+              <small>Selecione outra organização para visualizar reuniões e convites.</small>
+            </div>
+            <a className="lk-button lk-button-secondary" href="/select-organization">
+              Gerenciar tudo
+            </a>
+          </header>
+          <div style={{ display: 'grid', gap: '1rem', marginTop: '1rem' }}>
+            {session.organizations.map((org) => {
+              const active = org.organizationId === session.currentOrganizationId;
+              return (
+                <article
+                  key={org.membershipId}
+                  className="lk-card"
+                  style={{ padding: '1rem 1.25rem', border: active ? '1px solid var(--lk-accent6)' : undefined }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <h4 style={{ marginBottom: 0 }}>{org.name}</h4>
+                      <small>{org.slug}</small>
+                    </div>
+                    <span className="lk-badge">{org.role}</span>
+                  </div>
+                  <p style={{ marginTop: '0.5rem', marginBottom: '0.75rem' }}>
+                    Plano: {org.plan ?? 'standard'} • {org.isDefault ? 'Padrão' : 'Secundária'}
+                  </p>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      className="lk-button"
+                      disabled={active || switchingOrgId === org.membershipId}
+                      onClick={() => handleSwitch(org.membershipId)}
+                    >
+                      {active ? 'Ativa' : switchingOrgId === org.membershipId ? 'Alternando...' : 'Ativar'}
+                    </button>
+                    <button
+                      type="button"
+                      className="lk-button lk-button-secondary"
+                      onClick={() => router.push(`/rooms/${generateRoomId()}`)}
+                    >
+                      Criar sala rápida
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      </section>
+    </main>
   );
 }

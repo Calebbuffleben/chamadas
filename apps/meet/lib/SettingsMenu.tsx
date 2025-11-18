@@ -22,14 +22,14 @@ export interface SettingsMenuProps extends React.HTMLAttributes<HTMLDivElement> 
 export function SettingsMenu(props: SettingsMenuProps) {
   const layoutContext = useMaybeLayoutContext();
   const room = useRoomContext();
-  const recordingEndpoint = process.env.NEXT_PUBLIC_LK_RECORD_ENDPOINT;
+  const recordingEndpoint = process.env.NEXT_PUBLIC_LK_RECORD_ENDPOINT || '/api/record';
 
   const settings = React.useMemo(() => {
     return {
       media: { camera: true, microphone: true, label: 'Media Devices', speaker: true },
       recording: recordingEndpoint ? { label: 'Recording' } : undefined,
     };
-  }, []);
+  }, [recordingEndpoint]);
 
   const tabs = React.useMemo(
     () => Object.keys(settings).filter((t) => t !== undefined) as Array<keyof typeof settings>,
@@ -57,11 +57,13 @@ export function SettingsMenu(props: SettingsMenuProps) {
     setProcessingRecRequest(true);
     setInitialRecStatus(isRecording);
     let response: Response;
-    if (isRecording) {
-      response = await fetch(recordingEndpoint + `/stop?roomName=${room.name}`);
-    } else {
-      response = await fetch(recordingEndpoint + `/start?roomName=${room.name}`);
-    }
+    const endpoint = isRecording ? '/stop' : '/start';
+    response = await fetch(`${recordingEndpoint}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ roomName: room.name }),
+    });
     if (response.ok) {
     } else {
       console.error(

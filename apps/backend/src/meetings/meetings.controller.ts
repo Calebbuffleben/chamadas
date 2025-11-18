@@ -1,4 +1,4 @@
-import { Body, Controller, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -25,6 +25,9 @@ export class MeetingsController {
     @Body() dto: RequestMeetingTokenDto,
     @CurrentUser() user: AuthUser,
   ) {
+    if (dto.organizationId && dto.organizationId !== user.organizationId) {
+      throw new ForbiddenException('Organization mismatch with current session');
+    }
     await this.sessionsService.assertMeetingBelongsToOrganization(meetingId, user.organizationId);
     const session = await this.sessionsService.getByMeetingId(meetingId);
     if (!session) {

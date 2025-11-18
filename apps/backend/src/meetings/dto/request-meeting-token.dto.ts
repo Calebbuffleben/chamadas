@@ -1,4 +1,4 @@
-import { IsOptional, IsString } from 'class-validator';
+import { IsOptional, IsString, IsUUID } from 'class-validator';
 
 export class RequestMeetingTokenDto {
   @IsOptional()
@@ -11,4 +11,8 @@ export class RequestMeetingTokenDto {
 
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsUUID()
+  organizationId?: string;
 }

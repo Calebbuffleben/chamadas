@@ -30,9 +30,7 @@ import { useRouter } from 'next/navigation';
 import { useSetupE2EE } from '@/lib/useSetupE2EE';
 import { useLowCPUOptimizer } from '@/lib/usePerfomanceOptimiser';
 import { useHostFeedback } from '@/lib/useHostFeedback';
-
-const CONN_DETAILS_ENDPOINT =
-  process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT ?? '/api/connection-details';
+import { useAuth } from '@/lib/auth';
 const SHOW_SETTINGS_MENU = process.env.NEXT_PUBLIC_SHOW_SETTINGS_MENU == 'true';
 
 export function PageClientImpl(props: {
@@ -54,26 +52,72 @@ export function PageClientImpl(props: {
   const [connectionDetails, setConnectionDetails] = React.useState<ConnectionDetails | undefined>(
     undefined,
   );
+  const { session, loading: authLoading } = useAuth();
+  const [error, setError] = React.useState<string | null>(null);
 
-  const handlePreJoinSubmit = React.useCallback(async (values: LocalUserChoices) => {
-    setPreJoinChoices(values);
-    const url = new URL(CONN_DETAILS_ENDPOINT, window.location.origin);
-    url.searchParams.append('roomName', props.roomName);
-    url.searchParams.append('participantName', values.username);
-    if (props.region) {
-      url.searchParams.append('region', props.region);
-    }
-    // Allow force-host via URL flag, e.g., /rooms/<room>?host=1
-    const qp = new URLSearchParams(window.location.search);
-    const isHost = qp.get('host') === '1' || qp.get('role') === 'host';
-    if (isHost) {
-      url.searchParams.append('metadata', JSON.stringify({ roles: ['host'], name: values.username }));
-    }
-    const connectionDetailsResp = await fetch(url.toString());
-    const connectionDetailsData = await connectionDetailsResp.json();
-    setConnectionDetails(connectionDetailsData);
-  }, []);
+  const handlePreJoinSubmit = React.useCallback(
+    async (values: LocalUserChoices) => {
+      if (!session) {
+        setError('Faça login para entrar na reunião.');
+        return;
+      }
+      setPreJoinChoices(values);
+      setError(null);
+      const metadata: Record<string, unknown> = {};
+      const qp = new URLSearchParams(window.location.search);
+      const isHost = qp.get('host') === '1' || qp.get('role') === 'host';
+      if (isHost) {
+        metadata.roles = ['host'];
+        metadata.name = values.username;
+      }
+      const identity = `${session.user.id}:${Date.now()}`;
+      try {
+        const response = await fetch('/api/connection-details', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            meetingId: props.roomName,
+            participantName: values.username,
+            identity,
+            metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+            organizationId: session.currentOrganizationId,
+          }),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { message?: string };
+          setError(payload?.message ?? 'Não foi possível obter o token da reunião');
+          return;
+        }
+        const connectionDetailsData = (await response.json()) as ConnectionDetails;
+        setConnectionDetails(connectionDetailsData);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Não foi possível contatar o servidor');
+      }
+    },
+    [props.roomName, session],
+  );
   const handlePreJoinError = React.useCallback((e: any) => console.error(e), []);
+
+  if (authLoading) {
+    return (
+      <main data-lk-theme="default" style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
+        <p>Verificando sessão...</p>
+      </main>
+    );
+  }
+
+  if (!session) {
+    return (
+      <main data-lk-theme="default" style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
+        <div className="lk-card" style={{ padding: '2rem', textAlign: 'center' }}>
+          <p>Você precisa estar autenticado para participar das reuniões.</p>
+          <a className="lk-button" href="/login">
+            Ir para login
+          </a>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main data-lk-theme="default" style={{ height: '100%' }}>
@@ -84,6 +128,7 @@ export function PageClientImpl(props: {
             onSubmit={handlePreJoinSubmit}
             onError={handlePreJoinError}
           />
+          {error && <p style={{ color: 'var(--lk-danger3)' }}>{error}</p>}
         </div>
       ) : (
         <VideoConferenceComponent
@@ -104,7 +149,7 @@ function VideoConferenceComponent(props: {
     codec: VideoCodec;
   };
 }) {
-  const keyProvider = new ExternalE2EEKeyProvider();
+  const keyProvider = React.useMemo(() => new ExternalE2EEKeyProvider(), []);
   const { worker, e2eePassphrase } = useSetupE2EE();
   const e2eeEnabled = !!(e2eePassphrase && worker);
 
@@ -138,11 +183,12 @@ function VideoConferenceComponent(props: {
       e2ee: keyProvider && worker && e2eeEnabled ? { keyProvider, worker } : undefined,
       singlePeerConnection: isMeetStaging(),
     };
-  }, [props.userChoices, props.options.hq, props.options.codec]);
+  }, [props.userChoices, props.options.hq, props.options.codec, e2eeEnabled, keyProvider, worker]);
 
-  const room = React.useMemo(() => new Room(roomOptions), []);
+  const room = React.useMemo(() => new Room(roomOptions), [roomOptions]);
   // Host feedback: connect once the room is constructed (roomName from connectionDetails)
-  useHostFeedback(room, props.connectionDetails.roomName);
+  const { session } = useAuth();
+  useHostFeedback(room, props.connectionDetails.roomName, session?.accessToken);
 
 
   React.useEffect(() => {
@@ -165,12 +211,25 @@ function VideoConferenceComponent(props: {
     } else {
       setE2eeSetupComplete(true);
     }
-  }, [e2eeEnabled, room, e2eePassphrase]);
+  }, [e2eeEnabled, room, e2eePassphrase, keyProvider]);
 
   const connectOptions = React.useMemo((): RoomConnectOptions => {
     return {
       autoSubscribe: true,
     };
+  }, []);
+
+  const router = useRouter();
+  const handleOnLeave = React.useCallback(() => router.push('/'), [router]);
+  const handleError = React.useCallback((error: Error) => {
+    console.error(error);
+    alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
+  }, []);
+  const handleEncryptionError = React.useCallback((error: Error) => {
+    console.error(error);
+    alert(
+      `Encountered an unexpected encryption error, check the console logs for details: ${error.message}`,
+    );
   }, []);
 
   React.useEffect(() => {
@@ -204,22 +263,18 @@ function VideoConferenceComponent(props: {
       room.off(RoomEvent.EncryptionError, handleEncryptionError);
       room.off(RoomEvent.MediaDevicesError, handleError);
     };
-  }, [e2eeSetupComplete, room, props.connectionDetails, props.userChoices]);
+  }, [
+    e2eeSetupComplete,
+    room,
+    props.connectionDetails,
+    props.userChoices,
+    connectOptions,
+    handleOnLeave,
+    handleEncryptionError,
+    handleError,
+  ]);
 
   const lowPowerMode = useLowCPUOptimizer(room);
-
-  const router = useRouter();
-  const handleOnLeave = React.useCallback(() => router.push('/'), [router]);
-  const handleError = React.useCallback((error: Error) => {
-    console.error(error);
-    alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
-  }, []);
-  const handleEncryptionError = React.useCallback((error: Error) => {
-    console.error(error);
-    alert(
-      `Encountered an unexpected encryption error, check the console logs for details: ${error.message}`,
-    );
-  }, []);
 
   React.useEffect(() => {
     if (lowPowerMode) {

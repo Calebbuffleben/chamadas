@@ -3,6 +3,8 @@ import '@livekit/components-styles';
 import '@livekit/components-styles/prefabs';
 import type { Metadata, Viewport } from 'next';
 import { Toaster } from 'react-hot-toast';
+import { AuthProvider } from '@/lib/auth';
+import { getSession } from '@/lib/auth/session';
 
 export const metadata: Metadata = {
   title: {
@@ -48,12 +50,15 @@ export const viewport: Viewport = {
   themeColor: '#070707',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const initialSession = await getSession();
   return (
     <html lang="en">
       <body data-lk-theme="default">
-        <Toaster position="top-right" />
-        {children}
+        <AuthProvider initialSession={initialSession}>
+          <Toaster position="top-right" />
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );

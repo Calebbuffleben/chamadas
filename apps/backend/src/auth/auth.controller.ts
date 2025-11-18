@@ -5,6 +5,8 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { LogoutDto } from './dto/logout.dto';
+import { SwitchOrganizationDto } from './dto/switch-organization.dto';
+import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { AuthUser } from '../common/interfaces/auth-user.interface';
@@ -42,6 +44,23 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async logout(@Body() dto: LogoutDto) {
     await this.authService.logout(dto);
+  }
+
+  @Post('invitations/accept')
+  async acceptInvitation(@Body() dto: AcceptInvitationDto, @Req() req: Request) {
+    const userAgent = req.headers['user-agent'] ?? undefined;
+    return this.authService.acceptInvitation(dto, userAgent);
+  }
+
+  @Post('switch')
+  @UseGuards(JwtAuthGuard)
+  async switchOrganization(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: SwitchOrganizationDto,
+    @Req() req: Request,
+  ) {
+    const userAgent = req.headers['user-agent'] ?? undefined;
+    return this.authService.switchOrganization(user.userId, dto.membershipId, userAgent);
   }
 
   @Get('me')

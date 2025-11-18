@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -13,8 +14,9 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { LogoutDto } from './dto/logout.dto';
+import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import type { AuthResult } from './interfaces/auth-result.interface';
-import { OrganizationRole, UserStatus } from '@prisma/client';
+import { InvitationStatus, OrganizationRole, UserStatus } from '@prisma/client';
 import { hash, compare } from 'bcryptjs';
 import { createHash } from 'crypto';
 import type { Organization, OrganizationMembership, User } from '@prisma/client';
@@ -158,6 +160,109 @@ export class AuthService {
       throw new UnauthorizedException();
     }
     return profile;
+  }
+
+  async switchOrganization(userId: string, membershipId: string, userAgent?: string): Promise<AuthResult> {
+    const membership = await this.prisma.organizationMembership.findUnique({
+      where: { id: membershipId },
+      include: {
+        organization: true,
+        user: true,
+      },
+    });
+
+    if (!membership || membership.userId !== userId) {
+      throw new ForbiddenException('Membership not found for current user');
+    }
+
+    if (membership.user.status !== UserStatus.active) {
+      throw new UnauthorizedException('User inactive');
+    }
+
+    return this.issueTokens({
+      user: membership.user,
+      membership,
+      organization: membership.organization,
+      userAgent,
+    });
+  }
+
+  async acceptInvitation(dto: AcceptInvitationDto, userAgent?: string): Promise<AuthResult> {
+    const tokenHash = this.hashToken(dto.token);
+    const invitation = await this.prisma.organizationInvitation.findFirst({
+      where: { tokenHash },
+      include: {
+        organization: true,
+      },
+    });
+
+    if (
+      !invitation ||
+      invitation.status !== 'pending' ||
+      (invitation.expiresAt && invitation.expiresAt.getTime() < Date.now())
+    ) {
+      throw new BadRequestException('Convite inválido ou expirado');
+    }
+
+    const existingMembership = await this.prisma.organizationMembership.findFirst({
+      where: {
+        organizationId: invitation.organizationId,
+        user: {
+          email: invitation.email,
+        },
+      },
+    });
+
+    if (existingMembership) {
+      throw new ConflictException('Você já faz parte desta organização');
+    }
+
+    const normalizedEmail = invitation.email.toLowerCase();
+
+    let user = await this.prisma.user.findFirst({
+      where: { email: normalizedEmail },
+    });
+
+    if (user) {
+      const matches = await compare(dto.password, user.passwordHash);
+      if (!matches) {
+        throw new UnauthorizedException('Senha inválida para o usuário convidado');
+      }
+      if (user.status !== UserStatus.active) {
+        throw new UnauthorizedException('Usuário inativo');
+      }
+    } else {
+      const passwordHash = await this.hashPassword(dto.password);
+      user = await this.prisma.user.create({
+        data: {
+          email: normalizedEmail,
+          name: dto.name,
+          passwordHash,
+          status: UserStatus.active,
+        },
+      });
+    }
+
+    const membership = await this.prisma.organizationMembership.create({
+      data: {
+        organizationId: invitation.organizationId,
+        userId: user.id,
+        role: invitation.role,
+        isDefault: false,
+      },
+    });
+
+    await this.prisma.organizationInvitation.update({
+      where: { id: invitation.id },
+      data: { status: 'accepted' },
+    });
+
+    return this.issueTokens({
+      user,
+      membership,
+      organization: invitation.organization,
+      userAgent,
+    });
   }
 
   async getOrganizationsForUser(userId: string) {

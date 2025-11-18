@@ -3,6 +3,7 @@ import type { Room } from 'livekit-client';
 import { RoomEvent } from 'livekit-client';
 import { io, Socket } from 'socket.io-client';
 import { toast } from 'react-hot-toast';
+import { backendClientFetch } from './api-connection/client';
 
 type FeedbackPayload = {
   id: string;
@@ -35,7 +36,11 @@ function isHost(metadata: string | null | undefined): boolean {
   return false;
 }
 
-export function useHostFeedback(room: Room | undefined, roomName: string | undefined) {
+export function useHostFeedback(
+  room: Room | undefined,
+  roomName: string | undefined,
+  authToken?: string,
+) {
   const socketRef = useRef<Socket | null>(null);
   const seenRef = useRef<Set<string>>(new Set());
   const lastJoinedRef = useRef<string | null>(null);
@@ -50,15 +55,17 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
   }, []);
 
   useEffect(() => {
-    if (!room || !roomName) return;
+    if (!room || !roomName || !authToken) return;
     let cancelled = false;
     const controller = new AbortController();
 
     const resolveMeetingId: () => Promise<string> = async () => {
       try {
-        const url = new URL('/sessions/resolve', backendBase);
-        url.searchParams.set('roomName', roomName);
-        const res = await fetch(url.toString(), { signal: controller.signal });
+        const url = `/sessions/resolve?${new URLSearchParams({ roomName }).toString()}`;
+        const res = await backendClientFetch(url, authToken, { signal: controller.signal });
+        if (!res.ok) {
+          return roomName;
+        }
         const data = (await res.json()) as { ok: boolean; meetingId?: string };
         return data.ok && data.meetingId ? data.meetingId : roomName;
       } catch {
@@ -80,7 +87,10 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
       if (cancelled || !meetingId) return;
       let s = socketRef.current;
       if (!s) {
-        s = io(backendBase, { transports: ['websocket'] });
+        s = io(backendBase, {
+          transports: ['websocket'],
+          auth: { token: authToken },
+        });
         socketRef.current = s;
       }
       // Always re-bind listener to avoid duplicates
@@ -189,7 +199,7 @@ export function useHostFeedback(room: Room | undefined, roomName: string | undef
         lastJoinedRef.current = null;
       }
     };
-  }, [room, roomName, backendBase]);
+  }, [room, roomName, backendBase, authToken, debug, forceSubscribe]);
 }
 
 

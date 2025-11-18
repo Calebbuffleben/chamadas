@@ -1,89 +1,59 @@
-import { randomString } from '@/lib/client-utils';
-import { getLiveKitURL } from '@/lib/getLiveKitURL';
-import { ConnectionDetails } from '@/lib/types';
-import { AccessToken, AccessTokenOptions, VideoGrant } from 'livekit-server-sdk';
 import { NextRequest, NextResponse } from 'next/server';
+import { backendFetch } from '@/lib/api-connection/server';
+import type { ConnectionDetails } from '@/lib/types';
 
-const API_KEY = process.env.LIVEKIT_API_KEY;
-const API_SECRET = process.env.LIVEKIT_API_SECRET;
-const LIVEKIT_URL = process.env.LIVEKIT_URL;
+type ConnectionRequestBody = {
+  meetingId?: string;
+  participantName?: string;
+  identity?: string;
+  organizationId?: string;
+  metadata?: Record<string, unknown>;
+};
 
-const COOKIE_KEY = 'random-participant-postfix';
-
-export async function GET(request: NextRequest) {
-  try {
-    // Parse query parameters
-    const roomName = request.nextUrl.searchParams.get('roomName');
-    const participantName = request.nextUrl.searchParams.get('participantName');
-    const metadata = request.nextUrl.searchParams.get('metadata') ?? '';
-    const region = request.nextUrl.searchParams.get('region');
-    if (!LIVEKIT_URL) {
-      throw new Error('LIVEKIT_URL is not defined');
-    }
-    const livekitServerUrl = region ? getLiveKitURL(LIVEKIT_URL, region) : LIVEKIT_URL;
-    let randomParticipantPostfix = request.cookies.get(COOKIE_KEY)?.value;
-    if (livekitServerUrl === undefined) {
-      throw new Error('Invalid region');
-    }
-
-    if (typeof roomName !== 'string') {
-      return new NextResponse('Missing required query parameter: roomName', { status: 400 });
-    }
-    if (participantName === null) {
-      return new NextResponse('Missing required query parameter: participantName', { status: 400 });
-    }
-
-    // Generate participant token
-    if (!randomParticipantPostfix) {
-      randomParticipantPostfix = randomString(4);
-    }
-    const participantToken = await createParticipantToken(
-      {
-        identity: `${participantName}__${randomParticipantPostfix}`,
-        name: participantName,
-        metadata,
-      },
-      roomName,
+export async function POST(request: NextRequest) {
+  const body = (await request.json()) as ConnectionRequestBody;
+  if (!body.meetingId || !body.participantName || !body.identity) {
+    return NextResponse.json(
+      { message: 'meetingId, identity e participantName são obrigatórios' },
+      { status: 400 },
     );
-
-    // Return connection details
-    const data: ConnectionDetails = {
-      serverUrl: livekitServerUrl,
-      roomName: roomName,
-      participantToken: participantToken,
-      participantName: participantName,
-    };
-    return new NextResponse(JSON.stringify(data), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Set-Cookie': `${COOKIE_KEY}=${randomParticipantPostfix}; Path=/; HttpOnly; SameSite=Strict; Secure; Expires=${getCookieExpirationTime()}`,
-      },
-    });
-  } catch (error) {
-    if (error instanceof Error) {
-      return new NextResponse(error.message, { status: 500 });
-    }
   }
-}
 
-function createParticipantToken(userInfo: AccessTokenOptions, roomName: string) {
-  const at = new AccessToken(API_KEY, API_SECRET, userInfo);
-  at.ttl = '5m';
-  const grant: VideoGrant = {
-    room: roomName,
-    roomJoin: true,
-    canPublish: true,
-    canPublishData: true,
-    canSubscribe: true,
+  // Ensure the backend has an active session placeholder for this meeting.
+  const search = new URLSearchParams({ roomName: body.meetingId });
+  await backendFetch(`/sessions/resolve?${search.toString()}`, {
+    method: 'GET',
+    throwOnError: false,
+  });
+
+  const response = await backendFetch(`/meetings/${body.meetingId}/token`, {
+    method: 'POST',
+    body: {
+      participantName: body.participantName,
+      identity: body.identity,
+      metadata: body.metadata,
+      organizationId: body.organizationId,
+    },
+    throwOnError: false,
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    return NextResponse.json(payload, { status: response.status });
+  }
+
+  const payload = (await response.json()) as {
+    serverUrl: string;
+    roomName: string;
+    participantToken: string;
   };
-  at.addGrant(grant);
-  return at.toJwt();
-}
 
-function getCookieExpirationTime(): string {
-  var now = new Date();
-  var time = now.getTime();
-  var expireTime = time + 60 * 120 * 1000;
-  now.setTime(expireTime);
-  return now.toUTCString();
+  const connectionDetails: ConnectionDetails = {
+    serverUrl: payload.serverUrl,
+    roomName: payload.roomName,
+    participantToken: payload.participantToken,
+    participantName: body.participantName,
+  };
+
+  return NextResponse.json(connectionDetails);
 }
