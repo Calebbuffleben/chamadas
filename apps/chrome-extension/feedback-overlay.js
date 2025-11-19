@@ -101,53 +101,38 @@
 		}, ITEM_TTL_MS);
 	}
 
-	function tryLoadSocketIo(cb) {
-		if (window.io && typeof window.io === 'function') {
-			cb();
+	function connectSocket(httpBase, meetingId) {
+		if (!window.io || typeof window.io !== 'function') {
+			startPolling(httpBase, meetingId);
 			return;
 		}
-		const script = document.createElement('script');
-		script.src = chrome.runtime.getURL('vendor/socket.io.min.js');
-		script.async = false;
-		script.onload = () => cb();
-		script.onerror = () => cb(); // fallback to polling
-		(document.head || document.documentElement).appendChild(script);
-	}
-
-	function connectSocket(httpBase, meetingId) {
-		tryLoadSocketIo(() => {
-			if (!window.io) {
-				startPolling(httpBase, meetingId);
-				return;
-			}
+		try {
+			socket = window.io(httpBase, {
+				transports: ['websocket'],
+				withCredentials: true
+			});
+		} catch (_e) {
+			startPolling(httpBase, meetingId);
+			return;
+		}
+		socket.on('connect', () => {
 			try {
-				socket = window.io(httpBase, {
-					transports: ['websocket'],
-					withCredentials: true
-				});
-			} catch (_e) {
-				startPolling(httpBase, meetingId);
-				return;
+				socket.emit('join-room', `feedback:${meetingId}`);
+			} catch (_e) {}
+		});
+		socket.on('feedback', (payload) => {
+			if (payload && typeof payload === 'object') {
+				addItem(payload);
 			}
-			socket.on('connect', () => {
-				try {
-					socket.emit('join-room', `feedback:${meetingId}`);
-				} catch (_e) {}
-			});
-			socket.on('feedback', (payload) => {
-				if (payload && typeof payload === 'object') {
-					addItem(payload);
-				}
-			});
-			socket.on('disconnect', () => {
-				// fallback to polling after a short delay
-				setTimeout(() => {
-					startPolling(httpBase, meetingId);
-				}, 1000);
-			});
-			socket.on('connect_error', () => {
+		});
+		socket.on('disconnect', () => {
+			// fallback to polling after a short delay
+			setTimeout(() => {
 				startPolling(httpBase, meetingId);
-			});
+			}, 1000);
+		});
+		socket.on('connect_error', () => {
+			startPolling(httpBase, meetingId);
 		});
 	}
 

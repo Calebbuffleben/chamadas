@@ -374,18 +374,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 								});
 							} else {
 								// Modo content (injeção na página)
-								chrome.tabs.sendMessage(tabId, {
-									type: 'INJECT_AND_START',
-									payload: {
-										tabId,
-										streamId,
-										sampleRate: targetSampleRate,
-										wsUrl: finalWsUrl,
-										feedbackHttpBase: httpBase,
-										meetingId: roomCode,
-										allowProcessorFallback: allowFallback
+								// Injeta scripts dependentes no contexto MAIN para contornar CSP e acessar window
+								chrome.scripting.executeScript({
+									target: { tabId },
+									world: 'MAIN',
+									files: ['vendor/socket.io.min.js', 'audio-capture.js', 'feedback-overlay.js']
+								}, () => {
+									if (chrome.runtime.lastError) {
+										console.warn('[background] Script injection failed:', chrome.runtime.lastError);
 									}
-								}, () => { void chrome.runtime.lastError; });
+									// Avisa content script (ISOLATED) para disparar os eventos de inicialização
+									chrome.tabs.sendMessage(tabId, {
+										type: 'INJECT_AND_START',
+										payload: {
+											tabId,
+											streamId,
+											sampleRate: targetSampleRate,
+											wsUrl: finalWsUrl,
+											feedbackHttpBase: httpBase,
+											meetingId: roomCode,
+											allowProcessorFallback: allowFallback
+										}
+									}, () => { void chrome.runtime.lastError; });
+								});
 							}
 
 							// Inicia overlay no content script

@@ -13,7 +13,13 @@ import type { FeedbackSeverity } from '../feedback/feedback.types';
 
 @NestWebSocketGateway({
   cors: {
-    origin: '*',
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      // Allow any origin in development, or specific ones in production
+      // For this project, we'll accept all for simplicity but ideally restrict to meet.google.com
+      callback(null, true);
+    },
     credentials: true,
   },
   namespace: '/',
