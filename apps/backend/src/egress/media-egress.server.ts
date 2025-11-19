@@ -212,20 +212,37 @@ export function setupAudioEgressWsServer(
 
     ws.on('message', async (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       try {
+        log.log(`WS frame received (${id}) type=${typeof data} ctor=${(data as any)?.constructor?.name} isBinary=${isBinary}`);
+        let incoming = data;
+        // Some environments deliver ArrayBuffer / TypedArray even when isBinary=false.
+        if (!isBinary) {
+          if (Array.isArray(data)) {
+            isBinary = true;
+          } else if (data instanceof ArrayBuffer) {
+            incoming = Buffer.from(data);
+            isBinary = true;
+          } else if (ArrayBuffer.isView(data)) {
+            const view = data as ArrayBufferView;
+            incoming = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+            isBinary = true;
+          }
+        }
         if (isBinary) {
           if (!muted) {
             let buf: Buffer;
-            if (Array.isArray(data)) {
-              buf = Buffer.concat(data);
-            } else if (Buffer.isBuffer(data)) {
-              buf = data as Buffer;
-            } else if (data instanceof ArrayBuffer) {
-              buf = Buffer.from(data);
-            } else if (ArrayBuffer.isView(data)) {
-              buf = Buffer.from(data);
+            if (Array.isArray(incoming)) {
+              buf = Buffer.concat(incoming);
+            } else if (Buffer.isBuffer(incoming)) {
+              buf = incoming as Buffer;
+            } else if (incoming instanceof ArrayBuffer) {
+              buf = Buffer.from(incoming);
+            } else if (ArrayBuffer.isView(incoming)) {
+              const view = incoming as ArrayBufferView;
+              buf = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
             } else {
-              throw new Error(`Unsupported binary frame payload type: ${typeof data}`);
+              throw new Error(`Unsupported binary frame payload type: ${typeof incoming}`);
             }
+            log.log(`Binary frame ${buf.length} bytes (${id})`);
             totalBytes += buf.length;
             await wav.appendPcm(buf);
             if (meetingId && pipeline) {

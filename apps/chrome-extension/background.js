@@ -1,0 +1,443 @@
+// Background Service Worker (MV3)
+// - Recebe comando do popup para iniciar captura
+// - Obtém o streamId via chrome.tabCapture.getMediaStreamId
+// - Envia streamId ao content script para injetar audio-capture.js e iniciar processamento
+
+console.log('[background] Service worker loaded/restarted at', new Date().toISOString());
+
+// WS proxy managed in background (avoids mixed-content from page)
+const __wsByTab = new Map(); // tabId -> { ws, url, ready, queue: ArrayBuffer[] }
+
+// Keep-alive mechanism to prevent service worker suspension during audio streaming
+let keepAliveInterval = null;
+function startKeepAlive() {
+	if (keepAliveInterval) return;
+	console.log('[background] Starting keep-alive');
+	keepAliveInterval = setInterval(() => {
+		console.log('[background] Keep-alive ping', { activeTabs: __wsByTab.size });
+	}, 20000); // Every 20 seconds
+}
+
+function stopKeepAlive() {
+	if (!keepAliveInterval) return;
+	console.log('[background] Stopping keep-alive');
+	clearInterval(keepAliveInterval);
+	keepAliveInterval = null;
+}
+
+// Config loader (config.json packaged with the extension)
+let __cfgCache = null;
+let __cfgLoadPromise = null;
+function loadConfig() {
+	if (__cfgCache) return Promise.resolve(__cfgCache);
+	if (__cfgLoadPromise) return __cfgLoadPromise;
+	__cfgLoadPromise = fetch(chrome.runtime.getURL('config.json'))
+		.then((res) => (res.ok ? res.json() : {}))
+		.then((json) => {
+			__cfgCache = json && typeof json === 'object' ? json : {};
+			return __cfgCache;
+		})
+		.catch(() => {
+			__cfgCache = {};
+			return __cfgCache;
+		});
+	return __cfgLoadPromise;
+}
+function cfgGet(key, fallback) {
+	if (__cfgCache && Object.prototype.hasOwnProperty.call(__cfgCache, key)) {
+		return __cfgCache[key];
+	}
+	return fallback;
+}
+
+console.log('[background] Registering onConnect listener');
+chrome.runtime.onConnect.addListener((port) => {
+	console.log('[background] Port connection attempt', { name: port.name, sender: port.sender });
+	if (port.name !== 'audio-ws') {
+		console.log('[background] Port name mismatch, ignoring');
+		return;
+	}
+	console.log('[background] audio-ws port connected, setting up listeners');
+	port.onMessage.addListener((msg) => {
+		try {
+			const type = msg?.type;
+			if (!type) {
+				console.warn('[background] Message without type:', msg);
+				return;
+			}
+			console.log('[background] port message', type, { tabId: msg.tabId, hasBuffer: !!msg.buffer, len: msg.byteLength });
+			if (type === 'PING') {
+				console.log('[background] Received PING');
+				return;
+			}
+			handlePortMessage(type, msg);
+		} catch (err) {
+			console.error('[background] Error handling port message:', err, { msg });
+		}
+	});
+	
+	function handlePortMessage(type, msg) {
+		if (type === 'AUDIO_WS_OPEN') {
+			const tabId = msg.tabId;
+			const url = msg.url;
+			if (typeof tabId !== 'number' || !url) return;
+			closeWsForTab(tabId);
+			const state = { ws: null, url, ready: false, queue: [], _byteCounter: 0 };
+			try {
+				const ws = new WebSocket(url);
+				ws.binaryType = 'arraybuffer';
+				ws.onopen = () => {
+					state.ready = true;
+					startKeepAlive(); // Keep service worker alive during streaming
+					console.log('[background] WS open', { tabId, queueLen: state.queue.length });
+					for (const buf of state.queue) {
+						try { ws.send(buf); } catch (_e) {}
+					}
+					state.queue = [];
+				};
+				ws.onerror = () => {};
+				ws.onclose = () => {
+					console.log('[background] WS closed', { tabId });
+					__wsByTab.delete(tabId);
+					if (__wsByTab.size === 0) {
+						stopKeepAlive(); // No more active connections
+					}
+				};
+				state.ws = ws;
+				__wsByTab.set(tabId, state);
+			} catch (_e) {}
+			return;
+		}
+		if (type === 'AUDIO_WS_SEND') {
+			const tabId = msg.tabId;
+			let buffer = msg.buffer;
+			const byteLength = msg.byteLength || (buffer && buffer.byteLength) || 0;
+			console.log('[background] AUDIO_WS_SEND buffer details', {
+				tabId,
+				isArrayBuffer: buffer instanceof ArrayBuffer,
+				isView: ArrayBuffer.isView(buffer),
+				constructor: buffer?.constructor?.name,
+				bufferType: typeof buffer,
+				hasBuffer: !!buffer,
+				byteLength,
+				keys: buffer ? Object.keys(buffer).slice(0, 5) : [],
+				isPlainObject: buffer && typeof buffer === 'object' && !ArrayBuffer.isView(buffer) && !(buffer instanceof ArrayBuffer)
+			});
+			if (typeof tabId !== 'number') return;
+			
+			// Handle different buffer types
+			if (!(buffer instanceof ArrayBuffer)) {
+				if (ArrayBuffer.isView(buffer)) {
+					// It's a TypedArray view
+					const view = buffer;
+					const start = typeof view.byteOffset === 'number' ? view.byteOffset : 0;
+					const end = start + (view.byteLength || 0);
+					buffer = view.buffer.slice(start, end);
+					console.log('[background] Converted from TypedArray view');
+				} else if (buffer && typeof buffer === 'object') {
+					// TypedArray was serialized to plain object - reconstruct it
+					console.log('[background] Attempting to reconstruct buffer from plain object');
+					try {
+						// Check if it has numeric keys (serialized TypedArray)
+						const keys = Object.keys(buffer);
+						const isSerializedTypedArray = keys.length > 0 && keys.every(k => !isNaN(parseInt(k, 10)));
+						
+						if (isSerializedTypedArray || byteLength > 0) {
+							const uint8 = new Uint8Array(byteLength || keys.length);
+							for (let i = 0; i < uint8.length; i++) {
+								uint8[i] = buffer[i] || 0;
+							}
+							buffer = uint8.buffer;
+							console.log('[background] Successfully reconstructed buffer', { length: buffer.byteLength });
+						} else {
+							console.warn('[background] Cannot reconstruct buffer - not a serialized TypedArray', { 
+								tabId, 
+								sampleKeys: keys.slice(0, 10) 
+							});
+							return;
+						}
+					} catch (err) {
+						console.error('[background] Failed to reconstruct buffer:', err);
+						return;
+					}
+				} else {
+					console.warn('[background] Invalid buffer type', { tabId, type: buffer?.constructor?.name });
+					return;
+				}
+			}
+			const state = __wsByTab.get(tabId);
+			if (!state || !state.ws) return;
+			state._byteCounter = (state._byteCounter || 0) + byteLength;
+			if (state._byteCounter >= 64000) {
+				console.log('[background] WS bytes sent', { tabId, sent: state._byteCounter });
+				state._byteCounter = 0;
+			}
+			if (state.ready) {
+				console.log('[background] WS send chunk', { tabId, len: byteLength });
+				state.ws.send(buffer);
+			} else {
+				console.log('[background] WS queue chunk', { tabId, len: byteLength });
+				state.queue.push(buffer.slice(0));
+			}
+			return;
+		}
+		if (type === 'AUDIO_WS_CLOSE') {
+			const tabId = msg.tabId;
+			if (typeof tabId !== 'number') return;
+			closeWsForTab(tabId);
+			return;
+		}
+	}
+	
+	console.log('[background] Message listener registered for port');
+	port.onDisconnect.addListener(() => {
+		const err = chrome.runtime.lastError;
+		console.warn('[background] Port disconnected from our side', { 
+			error: err?.message,
+			sender: port.sender
+		});
+	});
+	console.log('[background] Port setup complete');
+});
+
+// Global error handler for service worker
+self.addEventListener('error', (event) => {
+	console.error('[background] Global error:', event.error, event.message);
+});
+
+self.addEventListener('unhandledrejection', (event) => {
+	console.error('[background] Unhandled rejection:', event.reason);
+});
+
+function closeWsForTab(tabId) {
+	try {
+		const state = __wsByTab.get(tabId);
+		if (state && state.ws) {
+			try { state.ws.close(1000, 'stop'); } catch (_e) {}
+		}
+	} catch (_e) {}
+	__wsByTab.delete(tabId);
+}
+
+function stopCaptureForTab(tabId, captureMode) {
+	return new Promise((resolve) => {
+		closeWsForTab(tabId);
+		const delayResolve = () => setTimeout(resolve, 150);
+		if (captureMode === 'offscreen') {
+			try {
+				chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP', tabId }, () => { void chrome.runtime.lastError; delayResolve(); });
+			} catch (_e) {
+				delayResolve();
+			}
+			// Optional: close offscreen doc
+			try {
+				// @ts-ignore
+				chrome.offscreen?.closeDocument?.().catch?.(() => {});
+			} catch (_e) {}
+		} else {
+			try {
+				chrome.tabs.sendMessage(tabId, { type: 'STOP_CAPTURE' }, () => { void chrome.runtime.lastError; delayResolve(); });
+			} catch (_e2) {
+				delayResolve();
+			}
+		}
+	});
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+	if (message?.type === 'START_CAPTURE') {
+		const tabId = message.tabId;
+		const msgSampleRate = Number(message.sampleRate);
+
+		async function ensureOffscreen() {
+			try {
+				// @ts-ignore
+				const has = await chrome.offscreen.hasDocument?.();
+				if (has) return;
+				// @ts-ignore
+				await chrome.offscreen.createDocument?.({
+					url: 'offscreen.html',
+					reasons: ['WEB_RTC', 'AUDIO_PLAYBACK'],
+					justification: 'Processar áudio da aba com WebAudio em MV3'
+				});
+			} catch (_e) {}
+		}
+
+		function sanitize(val) {
+			return String(val || '')
+				.replace(/[^a-zA-Z0-9_\-\.]/g, '_')
+				.slice(0, 128) || 'unknown';
+		}
+		function extractMeetRoomCode(tabUrl) {
+			try {
+				const u = new URL(tabUrl);
+				const parts = (u.pathname || '').split('/').filter(Boolean);
+				if (parts.length === 0) return 'room';
+				if (parts[0] === 'lookup' && parts[1]) return sanitize(parts[1]);
+				return sanitize(parts[0]);
+			} catch (_e) {
+				return 'room';
+			}
+		}
+		function buildEgressAudioWsUrl(baseWs, egressPath, tabUrl, sampleRate) {
+			let urlString = baseWs.trim();
+			// Ensure protocol
+			if (!/^wss?:\/\//i.test(urlString)) {
+				urlString = 'ws://' + urlString;
+			}
+			let u;
+			try {
+				u = new URL(urlString);
+			} catch (_e) {
+				u = new URL('ws://localhost:3001');
+			}
+			// Force path to configured audio egress path
+			u.pathname = egressPath || '/egress-audio';
+			// Build query params
+			const room = extractMeetRoomCode(tabUrl);
+			const participant = 'browser';
+			const track = 'tab-audio';
+			u.searchParams.set('room', room);
+			u.searchParams.set('meetingId', room); // garante meetingId para pipeline/feedback
+			u.searchParams.set('participant', participant);
+			u.searchParams.set('track', track);
+			u.searchParams.set('sampleRate', String(sampleRate));
+			u.searchParams.set('channels', '1');
+			// meetingId optional → let backend deduce from session if available
+			return u.toString();
+		}
+		function wsToHttpBase(wsBase) {
+			try {
+				const u = new URL(/^[a-z]+:\/\//i.test(wsBase) ? wsBase : 'ws://' + wsBase);
+				u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
+				u.pathname = '/';
+				u.search = '';
+				u.hash = '';
+				return u.toString().replace(/\/+$/, '');
+			} catch (_e) {
+				return 'http://localhost:3001';
+			}
+		}
+
+		loadConfig().then(() => {
+			const baseWs = cfgGet('BACKEND_WS_BASE', 'ws://localhost:3001');
+			const egressPath = cfgGet('EGRESS_AUDIO_PATH', '/egress-audio');
+			const defaultSr = Number(cfgGet('DEFAULT_SAMPLE_RATE', '16000')) || 16000;
+			const allowFallback =
+				String(cfgGet('ALLOW_SCRIPT_PROCESSOR_FALLBACK', 'true')).toLowerCase() !== 'false';
+			const captureMode = String(cfgGet('CAPTURE_MODE', 'content')).toLowerCase();
+			const targetSampleRate = Number.isFinite(msgSampleRate) && msgSampleRate > 0 ? msgSampleRate : defaultSr;
+			stopCaptureForTab(tabId, captureMode).then(() => {
+				// Ensure offscreen doc closed when using offscreen mode
+				if (captureMode === 'offscreen') {
+					try {
+						// @ts-ignore
+						chrome.offscreen?.closeDocument?.().catch?.(() => {});
+					} catch (_e) {}
+				}
+				chrome.tabs.get(tabId, (tab) => {
+					const tabUrl = tab?.url || 'https://meet.google.com/';
+					const roomCode = extractMeetRoomCode(tabUrl);
+					const finalWsUrl = buildEgressAudioWsUrl(baseWs, egressPath, tabUrl, targetSampleRate);
+					const httpBase = wsToHttpBase(baseWs);
+
+					// getMediaStreamId permite que a página (via getUserMedia) acesse o áudio da própria aba
+					chrome.tabCapture.getMediaStreamId(
+						{ consumerTabId: tabId, targetTabId: tabId },
+						(streamId) => {
+						if (chrome.runtime.lastError) {
+							const errorMsg = chrome.runtime.lastError.message || 'Erro desconhecido em getMediaStreamId';
+							console.warn('[background] getMediaStreamId failed:', errorMsg, { tabId, captureMode });
+								// Fallback simples: avisa o content script/usuário
+								chrome.tabs.sendMessage(tabId, {
+									type: 'CAPTURE_FAILED',
+									error: errorMsg
+								}, () => {});
+								sendResponse({ ok: false, error: errorMsg });
+								return;
+							}
+
+							if (captureMode === 'offscreen') {
+								// Inicia captura no documento offscreen
+								ensureOffscreen().then(() => {
+									chrome.runtime.sendMessage({
+										type: 'OFFSCREEN_START',
+										payload: {
+											tabId,
+											streamId,
+											sampleRate: targetSampleRate,
+											wsUrl: finalWsUrl,
+											allowProcessorFallback: allowFallback
+										}
+									}, () => { void chrome.runtime.lastError; });
+									// read lastError to silence Unchecked runtime.lastError if no receiver
+								});
+							} else {
+								// Modo content (injeção na página)
+								chrome.tabs.sendMessage(tabId, {
+									type: 'INJECT_AND_START',
+									payload: {
+										tabId,
+										streamId,
+										sampleRate: targetSampleRate,
+										wsUrl: finalWsUrl,
+										feedbackHttpBase: httpBase,
+										meetingId: roomCode,
+										allowProcessorFallback: allowFallback
+									}
+								}, () => { void chrome.runtime.lastError; });
+							}
+
+							// Inicia overlay no content script
+							if (captureMode === 'offscreen') {
+								chrome.tabs.sendMessage(tabId, {
+									type: 'INJECT_AND_START',
+									payload: {
+										feedbackHttpBase: httpBase,
+										meetingId: roomCode
+									}
+								}, () => { void chrome.runtime.lastError; });
+							}
+
+						console.log('[background] captura iniciada', {
+							tabId,
+							captureMode,
+							targetSampleRate,
+							wsUrl: finalWsUrl
+						});
+						sendResponse({ ok: true });
+						}
+					);
+				});
+			});
+		});
+		// Responder de forma assíncrona
+		return true;
+	}
+	// WS proxy open
+	if (message?.type === 'STOP_CAPTURE') {
+		const tabId = message.tabId;
+		if (typeof tabId !== 'number') {
+			sendResponse({ ok: false, error: 'tabId inválido' });
+			return;
+		}
+		const captureMode = String((__cfgCache && __cfgCache['CAPTURE_MODE']) || 'content').toLowerCase();
+		if (captureMode === 'offscreen') {
+			// Parar overlay
+			chrome.tabs.sendMessage(tabId, { type: 'STOP_CAPTURE' }, () => { void chrome.runtime.lastError; });
+			// Parar offscreen
+			chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP', tabId }, () => { void chrome.runtime.lastError; });
+			// Tentar fechar o documento offscreen (opcional)
+			// @ts-ignore
+			chrome.offscreen?.closeDocument?.().catch?.(() => {});
+		} else {
+			// Parar captura no content
+			chrome.tabs.sendMessage(tabId, { type: 'STOP_CAPTURE' }, () => { void chrome.runtime.lastError; });
+		}
+		closeWsForTab(tabId);
+		sendResponse({ ok: true });
+		return true;
+	}
+});
+
+
