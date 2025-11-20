@@ -243,6 +243,14 @@ export function setupAudioEgressWsServer(
               throw new Error(`Unsupported binary frame payload type: ${typeof incoming}`);
             }
             log.log(`Binary frame ${buf.length} bytes (${id})`);
+            // DEBUG: Log first 20 samples to verify audio data is not all zeros
+            if (buf.length >= 40 && totalBytes < 10000) {
+              const samples: number[] = [];
+              for (let i = 0; i < Math.min(20, buf.length / 2); i++) {
+                samples.push(buf.readInt16LE(i * 2));
+              }
+              log.log(`[AUDIO DEBUG] First 20 samples: ${samples.join(',')}`);
+            }
             totalBytes += buf.length;
             await wav.appendPcm(buf);
             if (meetingId && pipeline) {

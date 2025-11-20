@@ -57,6 +57,7 @@
 	].join('\n');
 
 	function openWebSocket(url) {
+		console.log('[audio-capture] Opening WebSocket to:', url, { tabId: _tabId });
 		window.postMessage({ type: 'AUDIO_WS_OPEN', url, tabId: _tabId }, '*');
 	}
 
@@ -64,7 +65,14 @@
 		try {
 			// Send as ArrayBuffer for proper structured cloning
 			const ab = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
-			console.log('[audio-capture] sendPCM', { isArrayBuffer: ab instanceof ArrayBuffer, byteLength: ab.byteLength, tabId: _tabId });
+			if (bytesSent % 64000 < 1280) { // Log first few frames
+				console.log('[audio-capture] sendPCM', { 
+					isArrayBuffer: ab instanceof ArrayBuffer, 
+					byteLength: ab.byteLength, 
+					tabId: _tabId,
+					bytesSent 
+				});
+			}
 			window.postMessage({ type: 'AUDIO_WS_SEND', buffer: ab, tabId: _tabId }, '*');
 		} catch (e) {
 			console.error('[audio-capture] sendPCM error:', e);
@@ -74,11 +82,32 @@
 	function floatTo16BitPCM(float32) {
 		const len = float32.length;
 		const out = new Int16Array(len);
+		let nonZeroCount = 0;
+		let maxAbs = 0;
 		for (let i = 0; i < len; i++) {
 			let s = float32[i];
 			if (s > 1) s = 1;
 			else if (s < -1) s = -1;
 			out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+			if (s !== 0) nonZeroCount++;
+			const abs = Math.abs(s);
+			if (abs > maxAbs) maxAbs = abs;
+		}
+		// DEBUG: Log audio stats periodically
+		if (bytesSent < 64000 && bytesSent % 6400 === 0) {
+			console.log('[audio-capture] Audio stats:', { 
+				len, 
+				nonZeroCount, 
+				maxAbs: maxAbs.toFixed(6), 
+				allZeros: nonZeroCount === 0,
+				bytesSent 
+			});
+			// Log first 20 samples
+			const samples = [];
+			for (let i = 0; i < Math.min(20, len); i++) {
+				samples.push(out[i]);
+			}
+			console.log('[audio-capture] First 20 samples:', samples.join(','));
 		}
 		return out.buffer;
 	}
@@ -209,6 +238,31 @@
 		}
 
 		inputStream = stream;
+		
+		// DEBUG: Check if the stream has active audio tracks
+		const audioTracks = stream.getAudioTracks();
+		console.log('[audio-capture] Stream audio tracks:', audioTracks.map(t => ({
+			id: t.id,
+			label: t.label,
+			enabled: t.enabled,
+			readyState: t.readyState,
+			muted: t.muted,
+			settings: t.getSettings()
+		})));
+		
+		// Check if the track is actually receiving audio
+		if (audioTracks.length > 0) {
+			const track = audioTracks[0];
+			const checkTrackActivity = setInterval(() => {
+				console.log('[audio-capture] Track status check:', {
+					enabled: track.enabled,
+					readyState: track.readyState,
+					muted: track.muted
+				});
+			}, 1000);
+			setTimeout(() => clearInterval(checkTrackActivity), 5000);
+		}
+		
 		sourceNode = audioContext.createMediaStreamSource(stream);
 		gainNode = audioContext.createGain();
 		gainNode.gain.value = 0; // silencia saída
@@ -363,6 +417,47 @@
 			readyState: t.readyState,
 			muted: t.muted 
 		})));
+		
+		// DEBUG: Log audio levels from the stream for 10 seconds
+		const debugAnalyser = audioContext.createAnalyser();
+		debugAnalyser.fftSize = 2048;
+		sourceNode.connect(debugAnalyser);
+		const dataArray = new Uint8Array(debugAnalyser.frequencyBinCount);
+		let debugFrameCount = 0;
+		let allSilentFrames = 0;
+		const debugInterval = setInterval(() => {
+			debugFrameCount++;
+			debugAnalyser.getByteTimeDomainData(dataArray);
+			let sum = 0;
+			let nonZeroCount = 0;
+			for (let i = 0; i < dataArray.length; i++) {
+				const normalized = (dataArray[i] - 128) / 128;
+				if (dataArray[i] !== 128) nonZeroCount++;
+				sum += normalized * normalized;
+			}
+			const rms = Math.sqrt(sum / dataArray.length);
+			const dbfs = rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+			if (dbfs === -Infinity || rms < 0.001) {
+				allSilentFrames++;
+			}
+			console.log('[audio-capture] Live RMS:', dbfs.toFixed(1), 'dBFS', { 
+				rms: rms.toFixed(6), 
+				frameCount: debugFrameCount, 
+				nonZeroSamples: nonZeroCount,
+				allSilentSoFar: allSilentFrames === debugFrameCount
+			});
+			if (debugFrameCount >= 50) {
+				if (allSilentFrames === debugFrameCount) {
+					console.error('[audio-capture] ⚠️ CRITICAL: All frames are SILENT! Tab Audio Capture is NOT working. Possible causes:');
+					console.error('  1. Google Meet audio is not being captured by chrome.tabCapture API');
+					console.error('  2. The tab might not have permission to capture its own audio');
+					console.error('  3. Meet might be using a separate audio context that Tab Capture cannot access');
+					console.error('  Recommendation: Check if Meet has audio playing, verify tab permissions, try refreshing the page');
+				}
+				clearInterval(debugInterval);
+				try { debugAnalyser.disconnect(); } catch (_e) {}
+			}
+		}, 200);
 	}
 
 	function stopProcessing() {
@@ -397,33 +492,33 @@
 	}
 
 	async function getTabAudioStream(streamId) {
-		// Constrains específicos do Chrome para capturar a aba via streamId
-		const constraintsChromeMandatory = {
-			audio: {
-				mandatory: {
-					chromeMediaSource: 'tab',
-					chromeMediaSourceId: streamId
-				}
-			},
-			video: false
-		};
-		// Alguns ambientes aceitam sem "mandatory"
-		const constraintsChromeDirect = {
-			audio: {
-				chromeMediaSource: 'tab',
-				chromeMediaSourceId: streamId
-			},
-			video: false
-		};
+		// CRITICAL FIX: Tab capture doesn't work for Google Meet's WebRTC audio
+		// Google Meet uses isolated peer connections that aren't accessible via tabCapture
+		// SOLUTION: Capture user's microphone directly for emotional analysis
+		// NOTE: This will only analyze the LOCAL USER's voice, not all meeting participants
+		// For full meeting analysis, use LiveKit server-side egress instead
+		
+		console.warn('[audio-capture] ⚠️  Tab capture cannot access Google Meet audio.');
+		console.warn('[audio-capture] Switching to USER MICROPHONE capture for testing.');
+		console.warn('[audio-capture] This will analyze YOUR voice, not all participants.');
+		
 		try {
-			return await navigator.mediaDevices.getUserMedia(constraintsChromeMandatory);
-		} catch (_e1) {
-			try {
-				return await navigator.mediaDevices.getUserMedia(constraintsChromeDirect);
-			} catch (e2) {
-				console.error('[audio-capture] getUserMedia falhou:', e2);
-				throw e2;
-			}
+			console.log('[audio-capture] Requesting microphone access...');
+			const stream = await navigator.mediaDevices.getUserMedia({
+				audio: {
+					echoCancellation: true,
+					noiseSuppression: true,
+					autoGainControl: true,
+					sampleRate: { ideal: 16000 }
+				},
+				video: false
+			});
+			console.log('[audio-capture] ✅ Microphone access granted');
+			return stream;
+		} catch (e) {
+			console.error('[audio-capture] ❌ Failed to get microphone access:', e);
+			console.error('[audio-capture] Please allow microphone permissions for this extension.');
+			throw e;
 		}
 	}
 
@@ -466,6 +561,13 @@
 			handleStart(data.payload);
 		} else if (data.type === 'AUDIO_CAPTURE_STOP') {
 			stopProcessing();
+		} else if (data.type === 'EXTENSION_CONTEXT_INVALIDATED') {
+			console.error('[audio-capture] ⚠️ Extension context invalidated:', data.message);
+			console.error('[audio-capture] You need to RELOAD THIS PAGE for the extension to work again.');
+			// Stop processing if running
+			try {
+				stopProcessing();
+			} catch (_e) {}
 		}
 	});
 })();

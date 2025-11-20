@@ -10,12 +10,46 @@ const __wsByTab = new Map(); // tabId -> { ws, url, ready, queue: ArrayBuffer[] 
 
 // Keep-alive mechanism to prevent service worker suspension during audio streaming
 let keepAliveInterval = null;
+let keepAlivePort = null;
+
 function startKeepAlive() {
 	if (keepAliveInterval) return;
-	console.log('[background] Starting keep-alive');
+	console.log('[background] Starting keep-alive with port connection');
+	
+	// Create a long-lived port to self to keep the service worker alive
+	try {
+		keepAlivePort = chrome.runtime.connect({ name: 'keepalive' });
+		keepAlivePort.onDisconnect.addListener(() => {
+			console.log('[background] Keep-alive port disconnected');
+			keepAlivePort = null;
+			// Try to recreate if we still have active connections
+			if (__wsByTab.size > 0 && keepAliveInterval) {
+				setTimeout(() => {
+					if (__wsByTab.size > 0) {
+						try {
+							keepAlivePort = chrome.runtime.connect({ name: 'keepalive' });
+						} catch (_e) {}
+					}
+				}, 1000);
+			}
+		});
+	} catch (_e) {
+		console.error('[background] Failed to create keep-alive port:', _e);
+	}
+	
+	// Also use interval as backup
 	keepAliveInterval = setInterval(() => {
-		console.log('[background] Keep-alive ping', { activeTabs: __wsByTab.size });
-	}, 20000); // Every 20 seconds
+		console.log('[background] Keep-alive tick', { 
+			activeTabs: __wsByTab.size,
+			hasPort: !!keepAlivePort 
+		});
+		// Send a message to self to prevent suspension
+		try {
+			chrome.runtime.sendMessage({ type: 'KEEPALIVE_INTERNAL' }, () => {
+				void chrome.runtime.lastError;
+			});
+		} catch (_e) {}
+	}, 15000); // Every 15 seconds
 }
 
 function stopKeepAlive() {
@@ -23,6 +57,13 @@ function stopKeepAlive() {
 	console.log('[background] Stopping keep-alive');
 	clearInterval(keepAliveInterval);
 	keepAliveInterval = null;
+	
+	if (keepAlivePort) {
+		try {
+			keepAlivePort.disconnect();
+		} catch (_e) {}
+		keepAlivePort = null;
+	}
 }
 
 // Config loader (config.json packaged with the extension)
@@ -53,6 +94,19 @@ function cfgGet(key, fallback) {
 console.log('[background] Registering onConnect listener');
 chrome.runtime.onConnect.addListener((port) => {
 	console.log('[background] Port connection attempt', { name: port.name, sender: port.sender });
+	
+	// Handle keep-alive port (internal to keep service worker alive)
+	if (port.name === 'keepalive') {
+		console.log('[background] Keep-alive port connected');
+		port.onMessage.addListener((msg) => {
+			// Echo back to keep connection alive
+			try {
+				port.postMessage({ type: 'PONG', timestamp: Date.now() });
+			} catch (_e) {}
+		});
+		return;
+	}
+	
 	if (port.name !== 'audio-ws') {
 		console.log('[background] Port name mismatch, ignoring');
 		return;
@@ -80,24 +134,34 @@ chrome.runtime.onConnect.addListener((port) => {
 		if (type === 'AUDIO_WS_OPEN') {
 			const tabId = msg.tabId;
 			const url = msg.url;
-			if (typeof tabId !== 'number' || !url) return;
+			console.log('[background] AUDIO_WS_OPEN received', { tabId, url, hasUrl: !!url });
+			if (typeof tabId !== 'number' || !url) {
+				console.error('[background] Invalid AUDIO_WS_OPEN params', { tabId, url });
+				return;
+			}
 			closeWsForTab(tabId);
 			const state = { ws: null, url, ready: false, queue: [], _byteCounter: 0 };
+			console.log('[background] Creating WebSocket connection', { tabId, url });
 			try {
 				const ws = new WebSocket(url);
 				ws.binaryType = 'arraybuffer';
 				ws.onopen = () => {
 					state.ready = true;
 					startKeepAlive(); // Keep service worker alive during streaming
-					console.log('[background] WS open', { tabId, queueLen: state.queue.length });
+					console.log('[background] ✅ WS CONNECTED to backend', { tabId, url, queueLen: state.queue.length });
 					for (const buf of state.queue) {
-						try { ws.send(buf); } catch (_e) {}
+						try { 
+							console.log('[background] Sending queued buffer', { len: buf.byteLength });
+							ws.send(buf); 
+						} catch (_e) {}
 					}
 					state.queue = [];
 				};
-				ws.onerror = () => {};
-				ws.onclose = () => {
-					console.log('[background] WS closed', { tabId });
+				ws.onerror = (err) => {
+					console.error('[background] ❌ WS ERROR', { tabId, url, error: err });
+				};
+				ws.onclose = (event) => {
+					console.log('[background] WS closed', { tabId, code: event.code, reason: event.reason });
 					__wsByTab.delete(tabId);
 					if (__wsByTab.size === 0) {
 						stopKeepAlive(); // No more active connections
@@ -105,7 +169,9 @@ chrome.runtime.onConnect.addListener((port) => {
 				};
 				state.ws = ws;
 				__wsByTab.set(tabId, state);
-			} catch (_e) {}
+			} catch (e) {
+				console.error('[background] Failed to create WebSocket', { tabId, url, error: e });
+			}
 			return;
 		}
 		if (type === 'AUDIO_WS_SEND') {
@@ -166,17 +232,29 @@ chrome.runtime.onConnect.addListener((port) => {
 				}
 			}
 			const state = __wsByTab.get(tabId);
-			if (!state || !state.ws) return;
+			if (!state || !state.ws) {
+				console.warn('[background] No WS state found for AUDIO_WS_SEND', { 
+					tabId, 
+					hasState: !!state, 
+					hasWs: state?.ws ? true : false,
+					activeTabs: Array.from(__wsByTab.keys())
+				});
+				return;
+			}
 			state._byteCounter = (state._byteCounter || 0) + byteLength;
 			if (state._byteCounter >= 64000) {
 				console.log('[background] WS bytes sent', { tabId, sent: state._byteCounter });
 				state._byteCounter = 0;
 			}
 			if (state.ready) {
-				console.log('[background] WS send chunk', { tabId, len: byteLength });
-				state.ws.send(buffer);
+				try {
+					console.log('[background] WS send chunk', { tabId, len: byteLength, readyState: state.ws.readyState });
+					state.ws.send(buffer);
+				} catch (sendErr) {
+					console.error('[background] WS send failed', { tabId, error: sendErr.message });
+				}
 			} else {
-				console.log('[background] WS queue chunk', { tabId, len: byteLength });
+				console.log('[background] WS queue chunk (not ready yet)', { tabId, len: byteLength, queueSize: state.queue.length });
 				state.queue.push(buffer.slice(0));
 			}
 			return;
@@ -245,6 +323,15 @@ function stopCaptureForTab(tabId, captureMode) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+	// Handle keepalive/ping to wake up service worker
+	if (message?.type === 'KEEPALIVE' || message?.type === 'PING' || message?.type === 'KEEPALIVE_INTERNAL') {
+		if (message?.type !== 'KEEPALIVE_INTERNAL') {
+			console.log('[background] Received keepalive/ping from content');
+		}
+		sendResponse({ ok: true, timestamp: Date.now() });
+		return true;
+	}
+	
 	if (message?.type === 'START_CAPTURE') {
 		const tabId = message.tabId;
 		const msgSampleRate = Number(message.sampleRate);

@@ -9,18 +9,21 @@ type Sample = {
   speech: boolean;
   valence?: number;
   arousal?: number;
-  rmsDbfs?: number;
-};
-
-type ParticipantState = {
-  samples: Sample[]; // pruned to last 65s
-  ema: {
-    valence?: number;
-    arousal?: number;
-    rms?: number;
+    rmsDbfs?: number;
+    emotions?: Record<string, number>;
   };
-  cooldownUntilByType: Map<string, number>;
-};
+
+  type ParticipantState = {
+    samples: Sample[]; // pruned to last 65s
+    ema: {
+      valence?: number;
+      arousal?: number;
+      rms?: number;
+      emotions: Map<string, number>; // EMA per specific emotion
+    };
+    cooldownUntilByType: Map<string, number>;
+    lastFeedbackAt?: number; // Global cooldown to prevent spam
+  };
 
 @Injectable()
 export class FeedbackAggregatorService {
@@ -63,22 +66,37 @@ export class FeedbackAggregatorService {
       valence: evt.prosody.valence,
       arousal: evt.prosody.arousal,
       rmsDbfs: evt.signal?.rmsDbfs,
+      emotions: evt.prosody.emotions,
     };
     state.samples.push(sample);
     this.pruneOld(state, evt.ts);
     this.updateEma(state, sample);
     this.byKey.set(key, state);
 
+    // DEBUG: Log emotion EMA state periodically
+    if (state.samples.length % 20 === 0 && state.ema.emotions.size > 0) {
+      const top3 = Array.from(state.ema.emotions.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([name, score]) => `${name}:${score.toFixed(2)}`)
+        .join(', ');
+      this.logger.debug(`[EMA] ${participantId}: ${state.ema.emotions.size} emotions tracked. Top 3: ${top3}`);
+    }
+
     // Avaliar regras básicas v1
     this.evaluateSilenceProlongado(evt.meetingId, participantId, state, evt.ts);
     // Volume baixo/alto usando RMS (EMA + média de janela curta)
     this.evaluateVolume(evt.meetingId, participantId, state, evt.ts);
-    // Sentimento negativo (valence EMA)
-    this.evaluateTendenciaEmocionalNegativa(evt.meetingId, participantId, state, evt.ts);
-    // Engajamento baixo (arousal EMA)
-    this.evaluateEngajamentoBaixo(evt.meetingId, participantId, state, evt.ts);
-    // Frustração crescente (arousal↑ + valence↓ no período)
-    this.evaluateFrustracaoCrescente(evt.meetingId, participantId, state, evt.ts);
+    // Hostilidade/Raiva (substitui tendência emocional negativa)
+    this.evaluateHostility(evt.meetingId, participantId, state, evt.ts);
+    // Tédio/Desinteresse (substitui engajamento baixo)
+    this.evaluateBoredom(evt.meetingId, participantId, state, evt.ts);
+    // Frustração (modelo direto)
+    this.evaluateFrustration(evt.meetingId, participantId, state, evt.ts);
+    // Confusão (nova heurística)
+    this.evaluateConfusion(evt.meetingId, participantId, state, evt.ts);
+    // Engajamento Positivo (nova heurística)
+    this.evaluatePositiveEngagement(evt.meetingId, participantId, state, evt.ts);
     // Entusiasmo alto sustentado (arousal alto estável)
     this.evaluateEntusiasmoAlto(evt.meetingId, participantId, state, evt.ts);
     // Monotonia prosódica (baixa variância de arousal)
@@ -112,7 +130,7 @@ export class FeedbackAggregatorService {
     const speechCoverage = window.speechCount / window.samplesCount;
     if (speechCoverage < 0.1) {
       const type = 'silencio_prolongado';
-      if (this.inCooldown(state, type, now)) return;
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
       this.setCooldown(state, type, now, 15000); // 15s
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
       const payload: FeedbackEventPayload = {
@@ -143,62 +161,70 @@ export class FeedbackAggregatorService {
     const level = typeof mean === 'number' ? mean : typeof ema === 'number' ? ema : undefined;
     if (typeof level !== 'number') return;
 
+    // Mutex: only trigger ONE volume feedback (prioritize extremes)
+    const isLow = level <= -28;
+    const isHigh = level >= -10;
+
+    if (isLow && isHigh) {
+      // Impossible conflict, skip
+      return;
+    }
+
     // volume_baixo thresholds
-    if (level <= -28) {
+    if (isLow) {
       const type = 'volume_baixo';
-      if (!this.inCooldown(state, type, now)) {
-        const severity = level <= -34 ? 'critical' : 'warning';
-        this.setCooldown(state, type, now, 10000); // 10s
-        const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-        const payload: FeedbackEventPayload = {
-          id: this.makeId(),
-          type,
-          severity,
-          ts: now,
-          meetingId,
-          participantId,
-          window: { start: now - this.shortWindowMs, end: now },
-          message:
-            severity === 'critical'
-              ? `${name}: quase inaudível; aumente o ganho imediatamente.`
-              : `${name}: volume baixo; aproxime-se do microfone.`,
-          tips: severity === 'critical' ? ['Aumente o ganho de entrada', 'Aproxime-se do microfone'] : ['Verifique entrada de áudio', 'Desative redução agressiva de ruído'],
-          metadata: {
-            rmsDbfs: level,
-            speechCoverage,
-          },
-        };
-        this.delivery.publishToHosts(meetingId, payload);
-      }
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      const severity = level <= -34 ? 'critical' : 'warning';
+      this.setCooldown(state, type, now, 10000); // 10s
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.shortWindowMs, end: now },
+        message:
+          severity === 'critical'
+            ? `${name}: quase inaudível; aumente o ganho imediatamente.`
+            : `${name}: volume baixo; aproxime-se do microfone.`,
+        tips: severity === 'critical' ? ['Aumente o ganho de entrada', 'Aproxime-se do microfone'] : ['Verifique entrada de áudio', 'Desative redução agressiva de ruído'],
+        metadata: {
+          rmsDbfs: level,
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+      return;
     }
 
     // volume_alto thresholds
-    if (level >= -10) {
+    if (isHigh) {
       const type = 'volume_alto';
-      if (!this.inCooldown(state, type, now)) {
-        const severity = level >= -6 ? 'critical' : 'warning';
-        this.setCooldown(state, type, now, 10000); // 10s
-        const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-        const payload: FeedbackEventPayload = {
-          id: this.makeId(),
-          type,
-          severity,
-          ts: now,
-          meetingId,
-          participantId,
-          window: { start: now - this.shortWindowMs, end: now },
-          message:
-            severity === 'critical'
-              ? `${name}: áudio clipando; reduza o ganho.`
-              : `${name}: volume alto; afaste-se um pouco.`,
-          tips: ['Reduza sensibilidade do microfone'],
-          metadata: {
-            rmsDbfs: level,
-            speechCoverage,
-          },
-        };
-        this.delivery.publishToHosts(meetingId, payload);
-      }
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      const severity = level >= -6 ? 'critical' : 'warning';
+      this.setCooldown(state, type, now, 10000); // 10s
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.shortWindowMs, end: now },
+        message:
+          severity === 'critical'
+            ? `${name}: áudio clipando; reduza o ganho.`
+            : `${name}: volume alto; afaste-se um pouco.`,
+        tips: ['Reduza sensibilidade do microfone'],
+        metadata: {
+          rmsDbfs: level,
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
     }
   }
 
@@ -289,13 +315,208 @@ export class FeedbackAggregatorService {
     }
   }
 
+  private evaluateHostility(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    // Gate: Ensure significant speech activity
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) return;
+
+    const anger = state.ema.emotions.get('anger') ?? 0;
+    const disgust = state.ema.emotions.get('disgust') ?? 0;
+    const distress = state.ema.emotions.get('distress') ?? 0;
+    const hostilityScore = Math.max(anger, disgust, distress);
+
+    if (hostilityScore > 0.6) {
+      const type = 'hostilidade';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 30000);
+      
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: `${name}: a conversa esquentou. Considere validar o ponto do outro antes de prosseguir.`,
+        tips: ['Respire fundo', 'Use frases como "Entendo seu ponto..."', 'Evite interrupções agora'],
+        metadata: {
+          valenceEMA: state.ema.valence,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateBoredom(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    // Gate: Ensure significant speech activity (or lack thereof, but we need samples)
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5) return;
+    // For boredom, speech coverage might be low, but we check if present samples indicate boredom
+    
+    const boredom = state.ema.emotions.get('boredom') ?? 0;
+    const tiredness = state.ema.emotions.get('tiredness') ?? 0;
+    const interest = state.ema.emotions.get('interest') ?? 0;
+    
+    // High boredom/tiredness AND low interest
+    if ((boredom > 0.5 || tiredness > 0.6) && interest < 0.2) {
+      const type = 'tedio';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 25000);
+
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: `${name}: energia baixa detectada. Que tal trazer um novo ponto de vista?`,
+        tips: ['Mude a entonação', 'Faça uma pergunta aberta ao grupo'],
+        metadata: {
+          arousalEMA: state.ema.arousal,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateFrustration(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    // Gate: Ensure significant speech activity
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) return;
+
+    // Direct frustration detection from Hume model
+    const frustration = state.ema.emotions.get('frustration') ?? 0;
+    
+    if (frustration > 0.6) {
+      const type = 'frustracao_crescente';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 25000);
+
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: `${name}: parece haver um bloqueio ou frustração.`,
+        tips: ['Reconheça a dificuldade', 'Pergunte: "O que está impedindo nosso progresso?"'],
+        metadata: {
+          valenceEMA: state.ema.valence,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluateConfusion(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    // Gate: Ensure significant speech activity
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) return;
+
+    const confusion = state.ema.emotions.get('confusion') ?? 0;
+    const doubt = state.ema.emotions.get('doubt') ?? 0;
+    const score = Math.max(confusion, doubt);
+
+    if (score > 0.55) {
+      const type = 'confusao';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 20000);
+
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: `${name}: pontos de dúvida detectados. Seria bom checar o entendimento.`,
+        tips: ['Pergunte: "Isso faz sentido?"', 'Ofereça um exemplo prático'],
+        metadata: {},
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
+  private evaluatePositiveEngagement(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): void {
+    // Gate: Ensure significant speech activity
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.3) return;
+
+    const interest = state.ema.emotions.get('interest') ?? 0;
+    const joy = state.ema.emotions.get('joy') ?? 0;
+    const determination = state.ema.emotions.get('determination') ?? 0;
+    const score = Math.max(interest, joy, determination);
+
+    if (score > 0.7) {
+      const type = 'entusiasmo_alto'; // Reuse existing type
+      // Longer cooldown to not spam praise
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 60000);
+
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity: 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: now - this.longWindowMs, end: now },
+        message: `${name}: ótima energia e clareza! O grupo parece engajado.`,
+        tips: ['Mantenha esse tom', 'Aproveite para definir próximos passos'],
+        metadata: {},
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+    }
+  }
+
   // Novas heurísticas baseadas em sentimento/arousal
+  // (Mantidas como fallback ou removidas se totalmente substituídas)
   private evaluateTendenciaEmocionalNegativa(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
   ): void {
+    // Deprecated by evaluateHostility
+    // Keeping logic active only if emotions map is empty (fallback mode)
+    if (state.ema.emotions.size > 0) return;
+
     const val = state.ema.valence;
     if (typeof val !== 'number') return;
     // Requer fala razoável na janela longa
@@ -337,6 +558,9 @@ export class FeedbackAggregatorService {
     state: ParticipantState,
     now: number,
   ): void {
+    // Deprecated by evaluateBoredom
+    if (state.ema.emotions.size > 0) return;
+
     const ar = state.ema.arousal;
     if (typeof ar !== 'number') return;
     // Requer fala moderada na janela longa
@@ -378,6 +602,9 @@ export class FeedbackAggregatorService {
     state: ParticipantState,
     now: number,
   ): void {
+    // Deprecated by evaluateFrustration
+    if (state.ema.emotions.size > 0) return;
+
     const start = now - this.trendWindowMs;
     let arousalEarlySum = 0;
     let arousalEarlyN = 0;
@@ -833,60 +1060,68 @@ export class FeedbackAggregatorService {
     const w = this.window(state, now, this.longWindowMs);
     const speechCoverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
 
+    // Mutex: only evaluate ONE of these (prioritize acelerado if both conditions met)
+    const isAccelerated = switchesPerSec >= 1.0 && speechSegments >= 6;
+    const isPaused = longestSilence >= 3.0 || speechCoverage < 0.15;
+
+    if (isAccelerated && isPaused) {
+      // Conflito detectado: ignorar ambos
+      return;
+    }
+
     // ritmo acelerado
-    if (switchesPerSec >= 1.0 && speechSegments >= 6) {
+    if (isAccelerated) {
       const type = 'ritmo_acelerado';
-      if (!this.inCooldown(state, type, now)) {
-        this.setCooldown(state, type, now, 20000);
-        const severity: 'info' | 'warning' = switchesPerSec >= 1.5 ? 'warning' : 'info';
-        const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-        const payload: FeedbackEventPayload = {
-          id: this.makeId(),
-          type,
-          severity,
-          ts: now,
-          meetingId,
-          participantId,
-          window: { start, end: now },
-          message:
-            severity === 'warning'
-              ? `${name}: ritmo acelerado; desacelere para melhor entendimento.`
-              : `${name}: ritmo rápido; considere pausas curtas.`,
-          tips: ['Faça pausas para respiração', 'Enuncie com clareza'],
-          metadata: {
-            speechCoverage,
-          },
-        };
-        this.delivery.publishToHosts(meetingId, payload);
-      }
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 20000);
+      const severity: 'info' | 'warning' = switchesPerSec >= 1.5 ? 'warning' : 'info';
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start, end: now },
+        message:
+          severity === 'warning'
+            ? `${name}: ritmo acelerado; desacelere para melhor entendimento.`
+            : `${name}: ritmo rápido; considere pausas curtas.`,
+        tips: ['Faça pausas para respiração', 'Enuncie com clareza'],
+        metadata: {
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
+      return;
     }
 
     // ritmo pausado
-    if (longestSilence >= 3.0 || speechCoverage < 0.15) {
+    if (isPaused) {
       const type = 'ritmo_pausado';
-      if (!this.inCooldown(state, type, now)) {
-        this.setCooldown(state, type, now, 20000);
-        const severity: 'info' | 'warning' = longestSilence >= 5.0 ? 'warning' : 'info';
-        const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-        const payload: FeedbackEventPayload = {
-          id: this.makeId(),
-          type,
-          severity,
-          ts: now,
-          meetingId,
-          participantId,
-          window: { start, end: now },
-          message:
-            severity === 'warning'
-              ? `${name}: ritmo pausado; evite pausas longas.`
-              : `${name}: ritmo lento; aumente um pouco a cadência.`,
-          tips: ['Reduza pausas longas', 'Mantenha frases mais curtas'],
-          metadata: {
-            speechCoverage,
-          },
-        };
-        this.delivery.publishToHosts(meetingId, payload);
-      }
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
+      this.setCooldown(state, type, now, 20000);
+      const severity: 'info' | 'warning' = longestSilence >= 5.0 ? 'warning' : 'info';
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      const payload: FeedbackEventPayload = {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start, end: now },
+        message:
+          severity === 'warning'
+            ? `${name}: ritmo pausado; evite pausas longas.`
+            : `${name}: ritmo lento; aumente um pouco a cadência.`,
+        tips: ['Reduza pausas longas', 'Mantenha frases mais curtas'],
+        metadata: {
+          speechCoverage,
+        },
+      };
+      this.delivery.publishToHosts(meetingId, payload);
     }
   }
 
@@ -946,6 +1181,15 @@ export class FeedbackAggregatorService {
       state.ema.rms =
         typeof state.ema.rms === 'number' ? a * s.rmsDbfs + (1 - a) * state.ema.rms : s.rmsDbfs;
     }
+    // Update EMAs for specific emotions
+    if (s.emotions) {
+      for (const [name, score] of Object.entries(s.emotions)) {
+        const key = name.toLowerCase();
+        const prev = state.ema.emotions.get(key);
+        const next = typeof prev === 'number' ? a * score + (1 - a) * prev : score;
+        state.ema.emotions.set(key, next);
+      }
+    }
   }
 
   private inCooldown(state: ParticipantState, type: string, now: number): boolean {
@@ -955,12 +1199,19 @@ export class FeedbackAggregatorService {
 
   private setCooldown(state: ParticipantState, type: string, now: number, ms: number): void {
     state.cooldownUntilByType.set(type, now + ms);
+    state.lastFeedbackAt = now;
+  }
+
+  private inGlobalCooldown(state: ParticipantState, now: number, minGapMs = 5000): boolean {
+    return typeof state.lastFeedbackAt === 'number' && now - state.lastFeedbackAt < minGapMs;
   }
 
   private initState(): ParticipantState {
     return {
       samples: [],
-      ema: {},
+      ema: {
+        emotions: new Map(),
+      },
       cooldownUntilByType: new Map<string, number>(),
     };
   }

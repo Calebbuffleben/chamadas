@@ -60,6 +60,10 @@ export class HumeStreamService implements OnModuleDestroy {
       const [meetingId, participant, track] = this.parseKey(key);
       const participantRole = this.participantIndex.getParticipantRole(meetingId, participant);
       const speechDetected = Number.isFinite(rmsDbfs) ? rmsDbfs > -50 : false;
+      
+      // DEBUG: Log audio level to diagnose "No speech detected" issues (ALWAYS log to debug)
+      this.logger.log(`[Hume][AUDIO] RMS: ${rmsDbfs} dBFS (isFinite=${Number.isFinite(rmsDbfs)}, speech=${speechDetected ? 'YES' : 'NO'})`);
+      
       const evt: FeedbackIngestionEvent = {
         version: 1,
         meetingId,
@@ -208,8 +212,22 @@ export class HumeStreamService implements OnModuleDestroy {
             if (warnings.includes('W0105')) {
               speechDetected = false;
             }
-            // Try to extract valence/arousal from prosody block (or entire payload as fallback)
-            const { valence, arousal } = this.extractValenceArousal(prosody) ?? this.extractValenceArousal(anyObj);
+            // Extract specific emotions and valence/arousal
+            const extraction = this.extractEmotionsAndMetrics(prosody) ?? this.extractEmotionsAndMetrics(anyObj);
+            const { valence, arousal, emotions } = extraction;
+
+            // DEBUG: Log emotion extraction results
+            if (emotions && Object.keys(emotions).length > 0) {
+              const top3 = Object.entries(emotions)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([name, score]) => `${name}:${score.toFixed(2)}`)
+                .join(', ');
+              this.logger.log(`[Hume][EMOTIONS] Extracted ${Object.keys(emotions).length} emotions. Top 3: ${top3}`);
+            } else {
+              this.logger.warn(`[Hume][EMOTIONS] No emotions extracted from response. V=${valence?.toFixed(2)} A=${arousal?.toFixed(2)}`);
+            }
+
             const [meetingId, participant, track] = this.parseKey(key);
             const participantRole = this.participantIndex.getParticipantRole(
               meetingId,
@@ -227,6 +245,7 @@ export class HumeStreamService implements OnModuleDestroy {
                 speechDetected,
                 valence,
                 arousal,
+                emotions,
                 warnings,
               },
               debug: {
@@ -266,8 +285,11 @@ export class HumeStreamService implements OnModuleDestroy {
     const b64 = Buffer.from(wavChunk).toString('base64');
     const payload: Record<string, unknown> = {
       data: b64,
-      // always include models to satisfy Hume validator
-      models: { prosody: {} },
+      // Use 'prosody' model - it returns emotions array by default in recent API versions
+      // The emotions array contains all 48 emotions + Valence/Arousal
+      models: {
+        prosody: {},
+      },
     };
     return JSON.stringify(payload);
   }
@@ -320,26 +342,61 @@ export class HumeStreamService implements OnModuleDestroy {
   }
 
   /**
-   * Recursively searches an object/array for numeric 'valence' and 'arousal' keys.
-   * Returns clamped values in [-1, 1] if found.
+   * Recursively searches for 'emotions' array and V/A metrics.
    */
-  private extractValenceArousal(input: unknown): { valence?: number; arousal?: number } {
+  private extractEmotionsAndMetrics(
+    input: unknown,
+  ): { valence?: number; arousal?: number; emotions?: Record<string, number> } {
     let foundValence: number | undefined;
     let foundArousal: number | undefined;
+    let foundEmotions: Record<string, number> | undefined;
+
     const seen = new Set<unknown>();
     const visit = (node: unknown): void => {
       if (node === null || node === undefined) return;
       if (typeof node !== 'object') return;
       if (seen.has(node)) return;
       seen.add(node);
+
       if (Array.isArray(node)) {
         for (const item of node) {
-          if (foundValence !== undefined && foundArousal !== undefined) return;
+          if (
+            foundValence !== undefined &&
+            foundArousal !== undefined &&
+            foundEmotions !== undefined
+          )
+            return;
           visit(item);
         }
         return;
       }
+
       const rec = node as Record<string, unknown>;
+      
+      // Look for emotions array: [{name: "Anger", score: 0.5}, ...]
+      if (Array.isArray(rec['emotions'])) {
+        const list = rec['emotions'] as Array<unknown>;
+        const map: Record<string, number> = {};
+        let hasValid = false;
+        for (const item of list) {
+          if (
+            item &&
+            typeof item === 'object' &&
+            'name' in item &&
+            'score' in item
+          ) {
+            const i = item as { name: unknown; score: unknown };
+            if (typeof i.name === 'string' && typeof i.score === 'number') {
+              map[i.name] = i.score;
+              hasValid = true;
+            }
+          }
+        }
+        if (hasValid && !foundEmotions) {
+          foundEmotions = map;
+        }
+      }
+
       for (const [k, v] of Object.entries(rec)) {
         const key = k.toLowerCase();
         if ((key === 'valence' || key.endsWith('_valence')) && typeof v === 'number') {
@@ -347,13 +404,14 @@ export class HumeStreamService implements OnModuleDestroy {
         } else if ((key === 'arousal' || key.endsWith('_arousal')) && typeof v === 'number') {
           foundArousal = this.clampMinus1To1(v);
         } else if (typeof v === 'object' && v !== null) {
-          if (foundValence !== undefined && foundArousal !== undefined) break;
+          if (foundValence !== undefined && foundArousal !== undefined && foundEmotions !== undefined) break;
           visit(v);
         }
       }
     };
+
     visit(input);
-    return { valence: foundValence, arousal: foundArousal };
+    return { valence: foundValence, arousal: foundArousal, emotions: foundEmotions };
   }
 
   private clampMinus1To1(v: number): number {

@@ -12,6 +12,7 @@ export interface FeedbackIngestionEvent {
     speechDetected: boolean;
     valence?: number;
     arousal?: number;
+    emotions?: Record<string, number>; // Map of specific emotion scores (0..1)
     warnings: string[];
   };
   signal?: {
@@ -55,7 +56,10 @@ export interface FeedbackEventPayload {
     | 'polarizacao_emocional'
     | 'efeito_pos_interrupcao'
     | 'ritmo_acelerado'
-    | 'ritmo_pausado';
+    | 'ritmo_pausado'
+    | 'hostilidade'
+    | 'tedio'
+    | 'confusao';
   severity: FeedbackSeverity;
   ts: number;
   meetingId: string;
