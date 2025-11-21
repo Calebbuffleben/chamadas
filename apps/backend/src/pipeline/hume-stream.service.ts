@@ -195,8 +195,33 @@ export class HumeStreamService implements OnModuleDestroy {
               if (typeof m === 'string') errorMsg = m;
             }
           }
-          // Emit normalized prosody ingestion event if present
+          // DIAGNOSTIC: Log ALL responses to see what Hume is returning
           const prosody = anyObj['prosody'];
+          const hasProsody = prosody && typeof prosody === 'object';
+          
+          // Try to extract emotions from the entire response, not just prosody
+          const fullExtraction = this.extractEmotionsAndMetrics(anyObj);
+          const prosodyExtraction = hasProsody ? this.extractEmotionsAndMetrics(prosody) : null;
+          const extraction = prosodyExtraction ?? fullExtraction;
+          const { valence, arousal, emotions } = extraction;
+          
+          // DIAGNOSTIC: Always log what we found
+          if (emotions && Object.keys(emotions).length > 0) {
+            const top5 = Object.entries(emotions)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 5)
+              .map(([name, score]) => `${name}:${score.toFixed(3)}`)
+              .join(', ');
+            this.logger.log(`[Hume][EMOTIONS] ✅ Found ${Object.keys(emotions).length} emotions. Top 5: ${top5}, source=${hasProsody ? 'prosody' : 'full'}`);
+          } else {
+            // Log structure to diagnose why no emotions
+            const prosodyKeys = hasProsody ? Object.keys(prosody as Record<string, unknown>) : [];
+            const allKeys = Object.keys(anyObj);
+            this.logger.warn(
+              `[Hume][EMOTIONS] ❌ No emotions found. prosody=${hasProsody}, prosodyKeys=[${prosodyKeys.join(', ')}], allKeys=[${allKeys.join(', ')}], V=${valence?.toFixed(2) ?? 'N/A'}, A=${arousal?.toFixed(2) ?? 'N/A'}`,
+            );
+          }
+          
           if (prosody && typeof prosody === 'object') {
             const warnings: string[] = [];
             let speechDetected = true;
@@ -211,21 +236,6 @@ export class HumeStreamService implements OnModuleDestroy {
             }
             if (warnings.includes('W0105')) {
               speechDetected = false;
-            }
-            // Extract specific emotions and valence/arousal
-            const extraction = this.extractEmotionsAndMetrics(prosody) ?? this.extractEmotionsAndMetrics(anyObj);
-            const { valence, arousal, emotions } = extraction;
-
-            // DEBUG: Log emotion extraction results
-            if (emotions && Object.keys(emotions).length > 0) {
-              const top3 = Object.entries(emotions)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 3)
-                .map(([name, score]) => `${name}:${score.toFixed(2)}`)
-                .join(', ');
-              this.logger.log(`[Hume][EMOTIONS] Extracted ${Object.keys(emotions).length} emotions. Top 3: ${top3}`);
-            } else {
-              this.logger.warn(`[Hume][EMOTIONS] No emotions extracted from response. V=${valence?.toFixed(2)} A=${arousal?.toFixed(2)}`);
             }
 
             const [meetingId, participant, track] = this.parseKey(key);
@@ -253,6 +263,35 @@ export class HumeStreamService implements OnModuleDestroy {
                 rawHash: this.sha256(text),
               },
             };
+            this.emitter.emit('feedback.ingestion', evt);
+          } else if (emotions && Object.keys(emotions).length > 0) {
+            // Emit event even if no prosody object, but we found emotions elsewhere
+            const [meetingId, participant, track] = this.parseKey(key);
+            const participantRole = this.participantIndex.getParticipantRole(
+              meetingId,
+              participant,
+            );
+            const evt: FeedbackIngestionEvent = {
+              version: 1,
+              meetingId,
+              roomName: undefined,
+              trackSid: track,
+              participantId: participant,
+              participantRole,
+              ts: Date.now(),
+              prosody: {
+                speechDetected: true, // Assume speech if we have emotions
+                valence,
+                arousal,
+                emotions,
+                warnings: [],
+              },
+              debug: {
+                rawPreview: preview,
+                rawHash: this.sha256(text),
+              },
+            };
+            this.logger.log(`[Hume][EMOTIONS] Emitting event without prosody object (emotions found elsewhere)`);
             this.emitter.emit('feedback.ingestion', evt);
           }
         }
