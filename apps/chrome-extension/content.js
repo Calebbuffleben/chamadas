@@ -141,8 +141,29 @@
 				return;
 			}
 			const handler = (message, _sender, sendResponse) => {
+					if (message?.type === 'INJECT_AND_START_MULTITRACK') {
+					// NEW: Multi-track mode
+					const payload = message.payload || {};
+					if (typeof payload.tabId === 'number') {
+						currentTabId = payload.tabId;
+					}
+					
+					// Initialize multi-track audio capture
+					window.postMessage({ type: 'AUDIO_CAPTURE_START_MULTITRACK', payload }, '*');
+					
+					// Initialize overlay
+					const overlayPayload = {
+						meetingId: payload.meetingId,
+						feedbackHttpBase: payload.feedbackHttpBase
+					};
+					window.postMessage({ type: 'FEEDBACK_OVERLAY_START', payload: overlayPayload }, '*');
+					
+					sendResponse?.({ ok: true });
+					return true;
+				}
+				
 				if (message?.type === 'INJECT_AND_START') {
-					// Scripts já foram injetados pelo background via chrome.scripting.executeScript
+					// LEGACY: Single-stream mode
 					const payload = message.payload || {};
 					if (typeof payload.tabId === 'number') {
 						currentTabId = payload.tabId;
@@ -206,12 +227,13 @@
 		if (data.type === 'AUDIO_WS_OPEN') {
 			const url = data.url;
 			const tabId = data.tabId ?? currentTabId;
+			const participantId = data.participantId; // NEW: participant ID for multi-track
 			if (!url) return;
 			const port = ensurePort();
-			const message = { type: 'AUDIO_WS_OPEN', tabId, url };
+			const message = { type: 'AUDIO_WS_OPEN', tabId, url, participantId };
 			if (!port) {
 				// Port is being created, queue the message
-				console.log('[content] Queueing AUDIO_WS_OPEN (port not ready yet)');
+				console.log('[content] Queueing AUDIO_WS_OPEN (port not ready yet)', { participantId });
 				messageQueue.push(message);
 				return;
 			}
@@ -225,6 +247,7 @@
 		if (data.type === 'AUDIO_WS_SEND') {
 			const buf = data.buffer;
 			const tabId = data.tabId ?? currentTabId;
+			const participantId = data.participantId; // NEW: participant ID for multi-track
 			if (!buf) return;
 			const port = ensurePort();
 			
@@ -244,7 +267,7 @@
 				
 				// Convert to Uint8Array for better serialization support in port.postMessage
 				const uint8Array = new Uint8Array(arrayBuffer);
-				const message = { type: 'AUDIO_WS_SEND', tabId, buffer: uint8Array, byteLength };
+				const message = { type: 'AUDIO_WS_SEND', tabId, buffer: uint8Array, byteLength, participantId };
 				
 				if (!port) {
 					// Port is being created, queue the message (but limit queue size to prevent memory issues)
@@ -267,8 +290,9 @@
 		}
 		if (data.type === 'AUDIO_WS_CLOSE') {
 			const tabId = data.tabId ?? currentTabId;
+			const participantId = data.participantId; // NEW: participant ID for multi-track
 			const port = ensurePort();
-			const message = { type: 'AUDIO_WS_CLOSE', tabId };
+			const message = { type: 'AUDIO_WS_CLOSE', tabId, participantId };
 			if (!port) {
 				// Port is being created, queue the message
 				messageQueue.push(message);

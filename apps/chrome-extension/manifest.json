@@ -20,7 +20,15 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["audio-capture.js", "audio-worklet-processor.js", "feedback-overlay.js", "vendor/socket.io.min.js"],
+      "resources": [
+        "webrtc-interceptor.js",
+        "meet-participant-detector.js",
+        "audio-capture-multitrack.js",
+        "audio-capture.js",
+        "audio-worklet-processor.js",
+        "feedback-overlay.js",
+        "vendor/socket.io.min.js"
+      ],
       "matches": ["https://meet.google.com/*"]
     }
   ]

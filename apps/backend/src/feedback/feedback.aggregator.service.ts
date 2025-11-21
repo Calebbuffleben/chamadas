@@ -68,6 +68,17 @@ export class FeedbackAggregatorService {
       rmsDbfs: evt.signal?.rmsDbfs,
       emotions: evt.prosody.emotions,
     };
+    
+    // DEBUG: Log incoming emotions BEFORE EMA
+    if (sample.emotions && Object.keys(sample.emotions).length > 0) {
+      const top3 = Object.entries(sample.emotions)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([name, score]) => `${name}:${score.toFixed(3)}`)
+        .join(', ');
+      this.logger.log(`[INGESTION] ${participantId}: Received ${Object.keys(sample.emotions).length} emotions. Top 3: ${top3}, speech=${sample.speech}`);
+    }
+    
     state.samples.push(sample);
     this.pruneOld(state, evt.ts);
     this.updateEma(state, sample);
@@ -75,12 +86,12 @@ export class FeedbackAggregatorService {
 
     // DEBUG: Log emotion EMA state periodically
     if (state.samples.length % 20 === 0 && state.ema.emotions.size > 0) {
-      const top3 = Array.from(state.ema.emotions.entries())
+      const top5 = Array.from(state.ema.emotions.entries())
         .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([name, score]) => `${name}:${score.toFixed(2)}`)
+        .slice(0, 5)
+        .map(([name, score]) => `${name}:${score.toFixed(3)}`)
         .join(', ');
-      this.logger.debug(`[EMA] ${participantId}: ${state.ema.emotions.size} emotions tracked. Top 3: ${top3}`);
+      this.logger.log(`[EMA] ${participantId}: ${state.ema.emotions.size} emotions tracked. Top 5: ${top5}`);
     }
 
     // Avaliar regras básicas v1
@@ -125,13 +136,36 @@ export class FeedbackAggregatorService {
     state: ParticipantState,
     now: number,
   ): void {
-    const window = this.window(state, now, this.longWindowMs);
-    if (window.samplesCount < 5) return;
+    // Use a MUCH longer window (60s) to avoid false positives
+    const silenceWindowMs = 60000; // 60 seconds
+    const window = this.window(state, now, silenceWindowMs);
+    if (window.samplesCount < 10) return; // Need more samples
+    
     const speechCoverage = window.speechCount / window.samplesCount;
-    if (speechCoverage < 0.1) {
+    
+    // Only trigger if:
+    // 1. Very low speech coverage (< 5%) in the last 60s
+    // 2. Participant has spoken before (to avoid alerting on passive listeners)
+    // 3. RMS is very low (indicating possible mic issue, not just silence)
+    
+    if (speechCoverage < 0.05) {
+      // Check if participant has EVER spoken (look at all samples)
+      const hasSpokenBefore = state.samples.some(s => s.speech);
+      
+      // If they never spoke, they might just be listening - don't alert
+      if (!hasSpokenBefore) return;
+      
+      // Check RMS to see if mic might be muted/disconnected
+      const rms = window.meanRmsDbfs;
+      const isMicPossiblyMuted = typeof rms !== 'number' || rms <= -50; // Very low or no signal
+      
+      // Only alert if mic seems muted AND they were speaking before
+      if (!isMicPossiblyMuted) return;
+      
       const type = 'silencio_prolongado';
       if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 15000); // 15s
+      this.setCooldown(state, type, now, 30000); // 30s cooldown (longer to avoid spam)
+      
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
       const payload: FeedbackEventPayload = {
         id: this.makeId(),
@@ -140,11 +174,12 @@ export class FeedbackAggregatorService {
         ts: now,
         meetingId,
         participantId,
-        window: { start: now - this.longWindowMs, end: now },
-        message: `${name}: silêncio prolongado; tudo certo?`,
-        tips: ['Cheque se o microfone está mutado/desconectado'],
+        window: { start: now - silenceWindowMs, end: now },
+        message: `${name}: sem áudio há 60s; microfone pode estar desconectado.`,
+        tips: ['Verifique se o microfone está conectado', 'Cheque as permissões de áudio'],
         metadata: {
           speechCoverage,
+          rmsDbfs: rms,
         },
       };
       this.delivery.publishToHosts(meetingId, payload);
@@ -323,19 +358,31 @@ export class FeedbackAggregatorService {
   ): void {
     // Gate: Ensure significant speech activity
     const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) return;
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) {
+      // DEBUG: Log why we're skipping
+      if (state.ema.emotions.size > 0) {
+        this.logger.debug(`[Hostility] ${participantId}: SKIPPED - samplesCount=${w.samplesCount}, speechCoverage=${(w.speechCount / w.samplesCount).toFixed(2)}, need: samples>=5 AND speech>=0.2`);
+      }
+      return;
+    }
 
     const anger = state.ema.emotions.get('anger') ?? 0;
     const disgust = state.ema.emotions.get('disgust') ?? 0;
     const distress = state.ema.emotions.get('distress') ?? 0;
     const hostilityScore = Math.max(anger, disgust, distress);
 
-    if (hostilityScore > 0.6) {
+    // DEBUG: Log when close to threshold
+    if (hostilityScore > 0.08 || state.ema.emotions.size > 0) {
+      this.logger.log(`[Hostility] ${participantId}: score=${hostilityScore.toFixed(3)} (anger=${anger.toFixed(3)}, disgust=${disgust.toFixed(3)}, distress=${distress.toFixed(3)}) threshold=0.15, emotionsSize=${state.ema.emotions.size}`);
+    }
+
+    if (hostilityScore > 0.15) { // Lowered from 0.25 to 0.15 for ultra-realistic detection
       const type = 'hostilidade';
       if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
       this.setCooldown(state, type, now, 30000);
       
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      this.logger.log(`[Hostility] 🔥 TRIGGERED for ${participantId}: score=${hostilityScore.toFixed(3)}`);
       const payload: FeedbackEventPayload = {
         id: this.makeId(),
         type,
@@ -362,20 +409,31 @@ export class FeedbackAggregatorService {
   ): void {
     // Gate: Ensure significant speech activity (or lack thereof, but we need samples)
     const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return;
+    if (w.samplesCount < 5) {
+      if (state.ema.emotions.size > 0) {
+        this.logger.debug(`[Boredom] ${participantId}: SKIPPED - samplesCount=${w.samplesCount}, need: samples>=5`);
+      }
+      return;
+    }
     // For boredom, speech coverage might be low, but we check if present samples indicate boredom
     
     const boredom = state.ema.emotions.get('boredom') ?? 0;
     const tiredness = state.ema.emotions.get('tiredness') ?? 0;
     const interest = state.ema.emotions.get('interest') ?? 0;
     
-    // High boredom/tiredness AND low interest
-    if ((boredom > 0.5 || tiredness > 0.6) && interest < 0.2) {
+    // DEBUG: Log when close to threshold
+    if (boredom > 0.05 || tiredness > 0.08 || state.ema.emotions.size > 0) {
+      this.logger.log(`[Boredom] ${participantId}: boredom=${boredom.toFixed(3)}, tiredness=${tiredness.toFixed(3)}, interest=${interest.toFixed(3)} thresholds=(0.12/0.15, interest<0.10), emotionsSize=${state.ema.emotions.size}`);
+    }
+    
+    // High boredom/tiredness AND low interest (lowered thresholds for ultra-realistic detection)
+    if ((boredom > 0.12 || tiredness > 0.15) && interest < 0.10) {
       const type = 'tedio';
       if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
       this.setCooldown(state, type, now, 25000);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      this.logger.log(`[Boredom] 😴 TRIGGERED for ${participantId}: boredom=${boredom.toFixed(3)}, tiredness=${tiredness.toFixed(3)}`);
       const payload: FeedbackEventPayload = {
         id: this.makeId(),
         type,
@@ -402,17 +460,28 @@ export class FeedbackAggregatorService {
   ): void {
     // Gate: Ensure significant speech activity
     const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) return;
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) {
+      if (state.ema.emotions.size > 0) {
+        this.logger.debug(`[Frustration] ${participantId}: SKIPPED - samplesCount=${w.samplesCount}, speechCoverage=${(w.speechCount / w.samplesCount).toFixed(2)}`);
+      }
+      return;
+    }
 
     // Direct frustration detection from Hume model
     const frustration = state.ema.emotions.get('frustration') ?? 0;
     
-    if (frustration > 0.6) {
+    // DEBUG: Log when close to threshold
+    if (frustration > 0.08 || state.ema.emotions.size > 0) {
+      this.logger.log(`[Frustration] ${participantId}: score=${frustration.toFixed(3)} threshold=0.15, emotionsSize=${state.ema.emotions.size}`);
+    }
+    
+    if (frustration > 0.15) { // Lowered from 0.25 to 0.15 for ultra-realistic detection
       const type = 'frustracao_crescente';
       if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
       this.setCooldown(state, type, now, 25000);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      this.logger.log(`[Frustration] 😤 TRIGGERED for ${participantId}: score=${frustration.toFixed(3)}`);
       const payload: FeedbackEventPayload = {
         id: this.makeId(),
         type,
@@ -439,18 +508,29 @@ export class FeedbackAggregatorService {
   ): void {
     // Gate: Ensure significant speech activity
     const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) return;
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.2) {
+      if (state.ema.emotions.size > 0) {
+        this.logger.debug(`[Confusion] ${participantId}: SKIPPED - samplesCount=${w.samplesCount}, speechCoverage=${(w.speechCount / w.samplesCount).toFixed(2)}`);
+      }
+      return;
+    }
 
     const confusion = state.ema.emotions.get('confusion') ?? 0;
     const doubt = state.ema.emotions.get('doubt') ?? 0;
     const score = Math.max(confusion, doubt);
 
-    if (score > 0.55) {
+    // DEBUG: Log when close to threshold
+    if (score > 0.06 || state.ema.emotions.size > 0) {
+      this.logger.log(`[Confusion] ${participantId}: score=${score.toFixed(3)} (confusion=${confusion.toFixed(3)}, doubt=${doubt.toFixed(3)}) threshold=0.12, emotionsSize=${state.ema.emotions.size}`);
+    }
+
+    if (score > 0.12) { // Lowered from 0.22 to 0.12 for ultra-realistic detection
       const type = 'confusao';
       if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
       this.setCooldown(state, type, now, 20000);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      this.logger.log(`[Confusion] 🤔 TRIGGERED for ${participantId}: score=${score.toFixed(3)}`);
       const payload: FeedbackEventPayload = {
         id: this.makeId(),
         type,
@@ -475,20 +555,31 @@ export class FeedbackAggregatorService {
   ): void {
     // Gate: Ensure significant speech activity
     const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.3) return;
+    if (w.samplesCount < 5 || (w.speechCount / w.samplesCount) < 0.3) {
+      if (state.ema.emotions.size > 0) {
+        this.logger.debug(`[PositiveEngagement] ${participantId}: SKIPPED - samplesCount=${w.samplesCount}, speechCoverage=${(w.speechCount / w.samplesCount).toFixed(2)}`);
+      }
+      return;
+    }
 
     const interest = state.ema.emotions.get('interest') ?? 0;
     const joy = state.ema.emotions.get('joy') ?? 0;
     const determination = state.ema.emotions.get('determination') ?? 0;
     const score = Math.max(interest, joy, determination);
 
-    if (score > 0.7) {
+    // DEBUG: Log when close to threshold
+    if (score > 0.10 || state.ema.emotions.size > 0) {
+      this.logger.log(`[PositiveEngagement] ${participantId}: score=${score.toFixed(3)} (interest=${interest.toFixed(3)}, joy=${joy.toFixed(3)}, determination=${determination.toFixed(3)}) threshold=0.18, emotionsSize=${state.ema.emotions.size}`);
+    }
+
+    if (score > 0.18) { // Lowered from 0.30 to 0.18 for ultra-realistic detection
       const type = 'entusiasmo_alto'; // Reuse existing type
       // Longer cooldown to not spam praise
       if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
       this.setCooldown(state, type, now, 60000);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      this.logger.log(`[PositiveEngagement] 🎉 TRIGGERED for ${participantId}: score=${score.toFixed(3)}`);
       const payload: FeedbackEventPayload = {
         id: this.makeId(),
         type,

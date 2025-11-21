@@ -212,7 +212,10 @@ export function setupAudioEgressWsServer(
 
     ws.on('message', async (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       try {
-        log.log(`WS frame received (${id}) type=${typeof data} ctor=${(data as any)?.constructor?.name} isBinary=${isBinary}`);
+        // Reduced logging to prevent spam - only log every 100 frames
+        if (totalBytes % 64000 === 0) {
+          log.log(`WS frame received (${id}) type=${typeof data} ctor=${(data as any)?.constructor?.name} isBinary=${isBinary}`);
+        }
         let incoming = data;
         // Some environments deliver ArrayBuffer / TypedArray even when isBinary=false.
         if (!isBinary) {
@@ -242,9 +245,12 @@ export function setupAudioEgressWsServer(
             } else {
               throw new Error(`Unsupported binary frame payload type: ${typeof incoming}`);
             }
-            log.log(`Binary frame ${buf.length} bytes (${id})`);
-            // DEBUG: Log first 20 samples to verify audio data is not all zeros
-            if (buf.length >= 40 && totalBytes < 10000) {
+            // Reduced logging - only log every ~64KB
+            if (totalBytes % 64000 === 0) {
+              log.log(`Binary frame ${buf.length} bytes (${id}) - Total: ${(totalBytes / 1024).toFixed(1)}KB`);
+            }
+            // DEBUG: Log first 20 samples to verify audio data is not all zeros (only once)
+            if (buf.length >= 40 && totalBytes < 1000) {
               const samples: number[] = [];
               for (let i = 0; i < Math.min(20, buf.length / 2); i++) {
                 samples.push(buf.readInt16LE(i * 2));

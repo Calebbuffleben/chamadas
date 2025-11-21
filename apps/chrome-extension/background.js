@@ -6,7 +6,9 @@
 console.log('[background] Service worker loaded/restarted at', new Date().toISOString());
 
 // WS proxy managed in background (avoids mixed-content from page)
-const __wsByTab = new Map(); // tabId -> { ws, url, ready, queue: ArrayBuffer[] }
+const __wsByTab = new Map(); // tabId -> { ws, url, ready, queue: ArrayBuffer[] } [LEGACY - single stream]
+// NEW: Multi-participant support
+const __wsByTabAndParticipant = new Map(); // tabId -> Map<participantId, { ws, url, ready, queue }>
 
 // Keep-alive mechanism to prevent service worker suspension during audio streaming
 let keepAliveInterval = null;
@@ -91,6 +93,27 @@ function cfgGet(key, fallback) {
 	return fallback;
 }
 
+// CRITICAL: Inject WebRTC interceptor as soon as Meet page loads
+// This must happen BEFORE Meet creates any RTCPeerConnection objects
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+	// Only inject when page starts loading and it's a Meet URL
+	if (changeInfo.status === 'loading' && tab.url?.includes('meet.google.com')) {
+		console.log('[background] Meet page detected, injecting WebRTC interceptor early', { tabId, url: tab.url });
+		
+		// Inject interceptor IMMEDIATELY
+		chrome.scripting.executeScript({
+			target: { tabId },
+			world: 'MAIN',
+			files: ['webrtc-interceptor.js'],
+			injectImmediately: true
+		}).then(() => {
+			console.log('[background] ✅ WebRTC interceptor pre-injected for', tabId);
+		}).catch((err) => {
+			console.warn('[background] Failed to pre-inject interceptor:', err);
+		});
+	}
+});
+
 console.log('[background] Registering onConnect listener');
 chrome.runtime.onConnect.addListener((port) => {
 	console.log('[background] Port connection attempt', { name: port.name, sender: port.sender });
@@ -133,8 +156,70 @@ chrome.runtime.onConnect.addListener((port) => {
 	function handlePortMessage(type, msg) {
 		if (type === 'AUDIO_WS_OPEN') {
 			const tabId = msg.tabId;
+			const participantId = msg.participantId;
 			const url = msg.url;
-			console.log('[background] AUDIO_WS_OPEN received', { tabId, url, hasUrl: !!url });
+			
+			// Multi-participant mode if participantId is provided
+			if (participantId) {
+				console.log('[background] AUDIO_WS_OPEN (multi-participant)', { tabId, participantId, url });
+				if (typeof tabId !== 'number' || !url || !participantId) {
+					console.error('[background] Invalid AUDIO_WS_OPEN params', { tabId, participantId, url });
+					return;
+				}
+				
+				// Get or create participant map for this tab
+				let participantMap = __wsByTabAndParticipant.get(tabId);
+				if (!participantMap) {
+					participantMap = new Map();
+					__wsByTabAndParticipant.set(tabId, participantMap);
+				}
+				
+				// Close existing connection for this participant if any
+				const existing = participantMap.get(participantId);
+				if (existing && existing.ws) {
+					try { existing.ws.close(1000, 'reconnect'); } catch (_e) {}
+				}
+				
+				// Create new connection state
+				const state = { ws: null, url, ready: false, queue: [], _byteCounter: 0 };
+				console.log('[background] Creating WebSocket for participant', { tabId, participantId, url });
+				
+				try {
+					const ws = new WebSocket(url);
+					ws.binaryType = 'arraybuffer';
+					ws.onopen = () => {
+						state.ready = true;
+						startKeepAlive();
+						console.log('[background] ✅ WS CONNECTED (participant)', { tabId, participantId, queueLen: state.queue.length });
+						for (const buf of state.queue) {
+							try { ws.send(buf); } catch (_e) {}
+						}
+						state.queue = [];
+					};
+					ws.onerror = (err) => {
+						console.error('[background] ❌ WS ERROR (participant)', { tabId, participantId, error: err });
+					};
+					ws.onclose = (event) => {
+						console.log('[background] WS closed (participant)', { tabId, participantId, code: event.code });
+						participantMap.delete(participantId);
+						if (participantMap.size === 0) {
+							__wsByTabAndParticipant.delete(tabId);
+						}
+						// Stop keep-alive if no more connections
+						if (__wsByTab.size === 0 && __wsByTabAndParticipant.size === 0) {
+							stopKeepAlive();
+						}
+					};
+					state.ws = ws;
+					participantMap.set(participantId, state);
+				} catch (e) {
+					console.error('[background] Failed to create WebSocket (participant)', { tabId, participantId, error: e });
+				}
+				return;
+			}
+			
+			// Legacy single-stream mode (no participantId)
+			console.log('[background] AUDIO_WS_OPEN (legacy)', { tabId, url, hasUrl: !!url });
 			if (typeof tabId !== 'number' || !url) {
 				console.error('[background] Invalid AUDIO_WS_OPEN params', { tabId, url });
 				return;
@@ -163,7 +248,7 @@ chrome.runtime.onConnect.addListener((port) => {
 				ws.onclose = (event) => {
 					console.log('[background] WS closed', { tabId, code: event.code, reason: event.reason });
 					__wsByTab.delete(tabId);
-					if (__wsByTab.size === 0) {
+					if (__wsByTab.size === 0 && __wsByTabAndParticipant.size === 0) {
 						stopKeepAlive(); // No more active connections
 					}
 				};
@@ -176,19 +261,10 @@ chrome.runtime.onConnect.addListener((port) => {
 		}
 		if (type === 'AUDIO_WS_SEND') {
 			const tabId = msg.tabId;
+			const participantId = msg.participantId;
 			let buffer = msg.buffer;
 			const byteLength = msg.byteLength || (buffer && buffer.byteLength) || 0;
-			console.log('[background] AUDIO_WS_SEND buffer details', {
-				tabId,
-				isArrayBuffer: buffer instanceof ArrayBuffer,
-				isView: ArrayBuffer.isView(buffer),
-				constructor: buffer?.constructor?.name,
-				bufferType: typeof buffer,
-				hasBuffer: !!buffer,
-				byteLength,
-				keys: buffer ? Object.keys(buffer).slice(0, 5) : [],
-				isPlainObject: buffer && typeof buffer === 'object' && !ArrayBuffer.isView(buffer) && !(buffer instanceof ArrayBuffer)
-			});
+			
 			if (typeof tabId !== 'number') return;
 			
 			// Handle different buffer types
@@ -231,6 +307,28 @@ chrome.runtime.onConnect.addListener((port) => {
 					return;
 				}
 			}
+			// Multi-participant mode
+			if (participantId) {
+				const participantMap = __wsByTabAndParticipant.get(tabId);
+				const state = participantMap?.get(participantId);
+				if (!state || !state.ws) {
+					console.warn('[background] No WS state for participant', { tabId, participantId });
+					return;
+				}
+				state._byteCounter = (state._byteCounter || 0) + byteLength;
+				if (state.ready) {
+					try {
+						state.ws.send(buffer);
+					} catch (sendErr) {
+						console.error('[background] WS send failed (participant)', { tabId, participantId, error: sendErr.message });
+					}
+				} else {
+					state.queue.push(buffer.slice(0));
+				}
+				return;
+			}
+			
+			// Legacy single-stream mode
 			const state = __wsByTab.get(tabId);
 			if (!state || !state.ws) {
 				console.warn('[background] No WS state found for AUDIO_WS_SEND', { 
@@ -261,8 +359,26 @@ chrome.runtime.onConnect.addListener((port) => {
 		}
 		if (type === 'AUDIO_WS_CLOSE') {
 			const tabId = msg.tabId;
+			const participantId = msg.participantId;
 			if (typeof tabId !== 'number') return;
-			closeWsForTab(tabId);
+			
+			if (participantId) {
+				// Close specific participant connection
+				const participantMap = __wsByTabAndParticipant.get(tabId);
+				if (participantMap) {
+					const state = participantMap.get(participantId);
+					if (state && state.ws) {
+						try { state.ws.close(1000, 'stop'); } catch (_e) {}
+					}
+					participantMap.delete(participantId);
+					if (participantMap.size === 0) {
+						__wsByTabAndParticipant.delete(tabId);
+					}
+				}
+			} else {
+				// Close all for tab (legacy)
+				closeWsForTab(tabId);
+			}
 			return;
 		}
 	}
@@ -461,28 +577,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 								});
 							} else {
 								// Modo content (injeção na página)
-								// Injeta scripts dependentes no contexto MAIN para contornar CSP e acessar window
+								// NEW: Inject WebRTC interceptor FIRST, then participant detector, then multi-track audio capture
+								// Order is critical: interceptor must be loaded before Meet initializes
 								chrome.scripting.executeScript({
 									target: { tabId },
 									world: 'MAIN',
-									files: ['vendor/socket.io.min.js', 'audio-capture.js', 'feedback-overlay.js']
+									files: ['webrtc-interceptor.js'],
+									injectImmediately: true // Critical: inject before page loads
 								}, () => {
 									if (chrome.runtime.lastError) {
-										console.warn('[background] Script injection failed:', chrome.runtime.lastError);
+										console.warn('[background] WebRTC interceptor injection failed:', chrome.runtime.lastError);
 									}
-									// Avisa content script (ISOLATED) para disparar os eventos de inicialização
-									chrome.tabs.sendMessage(tabId, {
-										type: 'INJECT_AND_START',
-										payload: {
-											tabId,
-											streamId,
-											sampleRate: targetSampleRate,
-											wsUrl: finalWsUrl,
-											feedbackHttpBase: httpBase,
-											meetingId: roomCode,
-											allowProcessorFallback: allowFallback
+									console.log('[background] ✅ WebRTC interceptor injected');
+									
+									// Then inject participant detector and audio processors
+									chrome.scripting.executeScript({
+										target: { tabId },
+										world: 'MAIN',
+										files: ['meet-participant-detector.js', 'audio-capture-multitrack.js', 'vendor/socket.io.min.js', 'feedback-overlay.js']
+									}, () => {
+										if (chrome.runtime.lastError) {
+											console.warn('[background] Script injection failed:', chrome.runtime.lastError);
 										}
-									}, () => { void chrome.runtime.lastError; });
+										console.log('[background] ✅ All scripts injected');
+										
+										// Initialize multi-track capture
+										chrome.tabs.sendMessage(tabId, {
+											type: 'INJECT_AND_START_MULTITRACK',
+											payload: {
+												tabId,
+												sampleRate: targetSampleRate,
+												wsUrl: finalWsUrl,
+												feedbackHttpBase: httpBase,
+												meetingId: roomCode,
+											}
+										}, () => { void chrome.runtime.lastError; });
+									});
 								});
 							}
 
