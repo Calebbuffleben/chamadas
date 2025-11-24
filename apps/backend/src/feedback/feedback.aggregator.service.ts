@@ -9,31 +9,197 @@ type Sample = {
   speech: boolean;
   valence?: number;
   arousal?: number;
-    rmsDbfs?: number;
-    emotions?: Record<string, number>;
-  };
+  rmsDbfs?: number;
+  emotions?: Record<string, number>;
+};
 
-  type ParticipantState = {
-    samples: Sample[]; // pruned to last 65s
-    ema: {
-      valence?: number;
-      arousal?: number;
-      rms?: number;
-      emotions: Map<string, number>; // EMA per specific emotion
-    };
-    cooldownUntilByType: Map<string, number>;
-    lastFeedbackAt?: number; // Global cooldown to prevent spam
+type ParticipantState = {
+  samples: Sample[]; // pruned to last 65s
+  ema: {
+    valence?: number;
+    arousal?: number;
+    rms?: number;
+    emotions: Map<string, number>; // EMA per specific emotion
   };
+  cooldownUntilByType: Map<string, number>;
+  lastFeedbackAt?: number; // Global cooldown to prevent spam
+};
+
+/**
+ * Arquitetura Emocional 2.0 (A2E2) - Thresholds Centralizados
+ * 
+ * Todas as heurísticas seguem uma hierarquia rígida de prioridade:
+ * 1. Camada 1: Emoções Primárias (maior prioridade)
+ * 2. Camada 2: Meta-Estados Emocionais
+ * 3. Camada 3: Sinais Prosódicos
+ * 4. Camada 4: Estados de Longo Prazo (menor prioridade)
+ */
+const THRESHOLDS = {
+  // Camada 1: Emoções Primárias
+  primaryEmotion: {
+    main: 0.05, // Threshold principal para emoções primárias
+    dominant: 0.15, // Emoção dominante (muito maior que outras)
+    rapidGrowth: 0.02, // Crescimento rápido do EMA
+    hostility: {
+      anger: 0.05,
+      disgust: 0.05,
+      distress: 0.05,
+    },
+    boredom: {
+      boredom: 0.05,
+      tiredness: 0.08,
+      interestLow: 0.05, // Interest deve estar abaixo disso
+    },
+    confusion: {
+      confusion: 0.05,
+      doubt: 0.05,
+    },
+    positiveEngagement: {
+      interest: 0.05,
+      joy: 0.05,
+      determination: 0.05,
+    },
+  },
+  // Camada 2: Meta-Estados Emocionais
+  meta: {
+    frustrationTrend: {
+      arousalDelta: 0.25, // Aumento de arousal
+      valenceDelta: -0.2, // Queda de valence
+    },
+    postInterruption: {
+      valenceDelta: -0.2, // Queda após interrupção
+      minCoverage: 0.2,
+      windowMin: 6000, // 6s após interrupção
+      windowMax: 30000, // 30s após interrupção
+    },
+    polarization: {
+      valenceNegative: -0.2,
+      valencePositive: 0.2,
+      difference: 0.5, // Diferença entre grupos
+      minParticipants: 3,
+    },
+  },
+  // Camada 3: Sinais Prosódicos
+  prosodic: {
+    volume: {
+      low: -28, // dBFS
+      lowCritical: -34,
+      high: -10,
+      highCritical: -6,
+    },
+    arousal: {
+      low: -0.4,
+      lowInfo: -0.2,
+      high: 0.5,
+      highWarning: 0.7,
+    },
+    valence: {
+      negativeSevere: -0.6,
+      negativeInfo: -0.35,
+    },
+    monotony: {
+      stdevWarning: 0.06,
+      stdevInfo: 0.1,
+    },
+    rhythm: {
+      accelerated: {
+        switchesPerSec: 1.0,
+        minSegments: 6,
+        warningThreshold: 1.5,
+      },
+      paused: {
+        longestSilence: 5.0, // segundos
+        warningThreshold: 7.0,
+        minCoverage: 0.10,
+      },
+    },
+    groupEnergy: {
+      low: -0.3,
+      lowWarning: -0.5,
+    },
+  },
+  // Camada 4: Estados de Longo Prazo
+  longTerm: {
+    silence: {
+      windowMs: 60000, // 60s
+      speechCoverage: 0.05, // < 5%
+      rmsThreshold: -50, // dBFS
+      minSamples: 10,
+    },
+    overlap: {
+      minParticipants: 2,
+      minCoverage: 0.2,
+    },
+    interruptions: {
+      windowMs: 60000, // 60s
+      minCount: 5,
+      throttleMs: 2000,
+    },
+    monologue: {
+      windowMs: 60000, // 60s
+      dominanceRatio: 0.8, // ≥80%
+      minSpeechEvents: 10,
+    },
+  },
+  // Cooldowns (em ms)
+  cooldowns: {
+    primaryEmotion: {
+      hostility: 30000,
+      boredom: 25000,
+      frustration: 25000,
+      confusion: 20000,
+      positiveEngagement: 60000, // Mais longo para evitar spam de elogios
+    },
+    meta: {
+      frustrationTrend: 25000,
+      postInterruption: 25000,
+      polarization: 45000,
+    },
+    prosodic: {
+      volume: 10000,
+      monotony: 20000,
+      rhythmAccelerated: 20000,
+      rhythmPaused: 60000,
+      arousal: 15000,
+      valence: 20000,
+      groupEnergy: 30000,
+    },
+    longTerm: {
+      silence: 30000,
+      overlap: 15000,
+      interruptions: 30000,
+    },
+  },
+  // Janelas temporais (em ms)
+  windows: {
+    short: 3000, // 3s
+    long: 10000, // 10s
+    trend: 20000, // 20s
+    prune: 65000, // 65s
+  },
+  // EMA
+  ema: {
+    alpha: 0.3,
+  },
+  // Speech coverage gates
+  speechGates: {
+    volume: 0.5,
+    prosodic: 0.3,
+    prosodicStrict: 0.4,
+    prosodicVeryStrict: 0.5,
+  },
+};
 
 @Injectable()
 export class FeedbackAggregatorService {
   private readonly logger = new Logger(FeedbackAggregatorService.name);
   private readonly byKey = new Map<string, ParticipantState>(); // key = meetingId:participantId
-  private readonly shortWindowMs = 3000;
-  private readonly longWindowMs = 10000;
-  private readonly trendWindowMs = 20000;
-  private readonly pruneHorizonMs = 65000;
-  private readonly emaAlpha = 0.3;
+  private readonly shortWindowMs = THRESHOLDS.windows.short;
+  private readonly longWindowMs = THRESHOLDS.windows.long;
+  private readonly trendWindowMs = THRESHOLDS.windows.trend;
+  private readonly pruneHorizonMs = THRESHOLDS.windows.prune;
+  private readonly emaAlpha = THRESHOLDS.ema.alpha;
+  
   // Meeting-level tracking for interruptions and cooldowns
   private readonly overlapHistoryByMeeting = new Map<string, number[]>(); // timestamps for overlap detections
   private readonly lastOverlapSampleAtByMeeting = new Map<string, number>(); // throttle overlap sampling
@@ -55,7 +221,6 @@ export class FeedbackAggregatorService {
     if (!participantId) return;
     const includeHost = (process.env.FEEDBACK_INCLUDE_HOST || 'false') === 'true';
     if (evt.participantRole === 'host' && !includeHost) {
-      // Não gerar feedback sobre o anfitrião
       return;
     }
     const key = this.key(evt.meetingId, participantId);
@@ -94,588 +259,316 @@ export class FeedbackAggregatorService {
       this.logger.log(`[EMA] ${participantId}: ${state.ema.emotions.size} emotions tracked. Top 5: ${top5}`);
     }
 
-    // Avaliar regras básicas v1
-    this.evaluateSilenceProlongado(evt.meetingId, participantId, state, evt.ts);
-    // Volume baixo/alto usando RMS (EMA + média de janela curta)
-    this.evaluateVolume(evt.meetingId, participantId, state, evt.ts);
-    // Hostilidade/Raiva (substitui tendência emocional negativa)
-    this.evaluateHostility(evt.meetingId, participantId, state, evt.ts);
-    // Tédio/Desinteresse (substitui engajamento baixo)
-    this.evaluateBoredom(evt.meetingId, participantId, state, evt.ts);
-    // Frustração (modelo direto)
-    this.evaluateFrustration(evt.meetingId, participantId, state, evt.ts);
-    // Confusão (nova heurística)
-    this.evaluateConfusion(evt.meetingId, participantId, state, evt.ts);
-    // Engajamento Positivo (nova heurística)
-    this.evaluatePositiveEngagement(evt.meetingId, participantId, state, evt.ts);
-    // Entusiasmo alto sustentado (arousal alto estável)
-    this.evaluateEntusiasmoAlto(evt.meetingId, participantId, state, evt.ts);
-    // Monotonia prosódica (baixa variância de arousal)
-    this.evaluateMonotoniaProsodica(evt.meetingId, participantId, state, evt.ts);
-    // Ritmo acelerado/pausado por alternância de VAD
-    this.evaluateRitmoAceleradoPausado(evt.meetingId, participantId, state, evt.ts);
-    // Queda de energia do grupo (arousal médio baixo entre convidados)
-    this.evaluateEnergiaGrupoBaixa(evt.meetingId, evt.ts);
-    // Polarização emocional do grupo
-    this.evaluatePolarizacaoEmocional(evt.meetingId, evt.ts);
-    // Atualiza rastreamento de último orador (para efeito pós-interrupção)
+    // ===================================================================
+    // ARQUITETURA EMOCIONAL 2.0 (A2E2) - Pipeline Hierárquico
+    // ===================================================================
+    // Prioridade absoluta: Camada 1 > Camada 2 > Camada 3 > Camada 4
+    // Cada camada só executa se as anteriores não retornaram feedback
+    
+    // Atualizar tracking de oradores (necessário para camadas 2 e 4)
     this.updateSpeakerTracking(evt.meetingId, evt.ts);
-    // Interrupções frequentes (contagem de overlaps por minuto)
-    this.evaluateInterrupcoesFrequentes(evt.meetingId, participantId, evt.ts);
-    // Efeito pós-interrupção (queda de valence do interrompido)
-    this.evaluateEfeitoPosInterrupcao(evt.meetingId, evt.ts);
-    // Overlap de fala (heurística simples por cobertura na janela longa)
-    this.evaluateOverlapFala(evt.meetingId, participantId, evt.ts);
-    // Monólogo prolongado (60s) - DISABLED: prioritizing emotional feedback
-    // this.evaluateMonologoProlongado(evt.meetingId, evt.ts);
+    
+    // CAMADA 1: Emoções Primárias (Alta Confiança)
+    const primaryResult = this.detectPrimaryEmotions(evt.meetingId, participantId, state, evt.ts);
+    if (primaryResult) {
+      this.delivery.publishToHosts(evt.meetingId, primaryResult);
+      return; // Prioridade absoluta: não executar camadas inferiores
+    }
+
+    // CAMADA 2: Meta-Estados Emocionais (Combinações)
+    const metaResult = this.detectMetaStates(evt.meetingId, participantId, state, evt.ts);
+    if (metaResult) {
+      this.delivery.publishToHosts(evt.meetingId, metaResult);
+      return; // Não executar camadas 3 e 4
+    }
+
+    // CAMADA 3: Sinais Prosódicos (Arousal, Valence, Energia)
+    const prosodicResult = this.detectProsodicSignals(evt.meetingId, participantId, state, evt.ts);
+    if (prosodicResult) {
+      this.delivery.publishToHosts(evt.meetingId, prosodicResult);
+      return; // Não executar camada 4
+    }
+
+    // CAMADA 4: Estados de Longo Prazo (Comportamentais)
+    const longTermResult = this.detectLongTermSignals(evt.meetingId, participantId, state, evt.ts);
+    if (longTermResult) {
+      this.delivery.publishToHosts(evt.meetingId, longTermResult);
+    }
   }
 
-  private evaluateSilenceProlongado(
+  // ===================================================================
+  // CAMADA 1: EMOÇÕES PRIMÁRIAS (Alta Confiança)
+  // ===================================================================
+  /**
+   * Detecta emoções primárias diretamente fornecidas pela Hume API.
+   * Esta é a camada de maior prioridade - sempre tem precedência sobre outras.
+   */
+  private detectPrimaryEmotions(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    // Use a MUCH longer window (60s) to avoid false positives
-    const silenceWindowMs = 60000; // 60 seconds
-    const window = this.window(state, now, silenceWindowMs);
-    if (window.samplesCount < 10) return; // Need more samples
-    
-    const speechCoverage = window.speechCount / window.samplesCount;
-    
-    // Only trigger if:
-    // 1. Very low speech coverage (< 5%) in the last 60s
-    // 2. Participant has spoken before (to avoid alerting on passive listeners)
-    // 3. RMS is very low (indicating possible mic issue, not just silence)
-    
-    if (speechCoverage < 0.05) {
-      // Check if participant has EVER spoken (look at all samples)
-      const hasSpokenBefore = state.samples.some(s => s.speech);
-      
-      // If they never spoke, they might just be listening - don't alert
-      if (!hasSpokenBefore) return;
-      
-      // Check RMS to see if mic might be muted/disconnected
-      const rms = window.meanRmsDbfs;
-      const isMicPossiblyMuted = typeof rms !== 'number' || rms <= -50; // Very low or no signal
-      
-      // Only alert if mic seems muted AND they were speaking before
-      if (!isMicPossiblyMuted) return;
-      
-      const type = 'silencio_prolongado';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 30000); // 30s cooldown (longer to avoid spam)
-      
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: 'warning',
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start: now - silenceWindowMs, end: now },
-        message: `${name}: sem áudio há 60s; microfone pode estar desconectado.`,
-        tips: ['Verifique se o microfone está conectado', 'Cheque as permissões de áudio'],
-        metadata: {
-          speechCoverage,
-          rmsDbfs: rms,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  private evaluateVolume(meetingId: string, participantId: string, state: ParticipantState, now: number): void {
-    const w = this.window(state, now, this.shortWindowMs);
-    if (w.samplesCount < 1) return;
-    const speechCoverage = w.speechCount / w.samplesCount;
-    if (speechCoverage < 0.5) return; // gate por fala
-    const mean = w.meanRmsDbfs;
-    const ema = state.ema.rms;
-    const level = typeof mean === 'number' ? mean : typeof ema === 'number' ? ema : undefined;
-    if (typeof level !== 'number') return;
-
-    // Mutex: only trigger ONE volume feedback (prioritize extremes)
-    const isLow = level <= -28;
-    const isHigh = level >= -10;
-
-    if (isLow && isHigh) {
-      // Impossible conflict, skip
-      return;
-    }
-
-    // volume_baixo thresholds
-    if (isLow) {
-      const type = 'volume_baixo';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      const severity = level <= -34 ? 'critical' : 'warning';
-      this.setCooldown(state, type, now, 10000); // 10s
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity,
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start: now - this.shortWindowMs, end: now },
-        message:
-          severity === 'critical'
-            ? `${name}: quase inaudível; aumente o ganho imediatamente.`
-            : `${name}: volume baixo; aproxime-se do microfone.`,
-        tips: severity === 'critical' ? ['Aumente o ganho de entrada', 'Aproxime-se do microfone'] : ['Verifique entrada de áudio', 'Desative redução agressiva de ruído'],
-        metadata: {
-          rmsDbfs: level,
-          speechCoverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-      return;
-    }
-
-    // volume_alto thresholds
-    if (isHigh) {
-      const type = 'volume_alto';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      const severity = level >= -6 ? 'critical' : 'warning';
-      this.setCooldown(state, type, now, 10000); // 10s
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity,
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start: now - this.shortWindowMs, end: now },
-        message:
-          severity === 'critical'
-            ? `${name}: áudio clipando; reduza o ganho.`
-            : `${name}: volume alto; afaste-se um pouco.`,
-        tips: ['Reduza sensibilidade do microfone'],
-        metadata: {
-          rmsDbfs: level,
-          speechCoverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  private evaluateOverlapFala(meetingId: string, participantId: string, now: number): void {
-    const participants = this.participantsForMeeting(meetingId);
-    if (participants.length < 2) return;
-    // Cobertura de fala por participante na janela longa (10s)
-    const speaking: Array<{ id: string; coverage: number; state: ParticipantState }> = [];
-    for (const [pid, st] of participants) {
-      const w = this.window(st, now, this.longWindowMs);
-      if (w.samplesCount === 0) continue;
-      const coverage = w.speechCount / w.samplesCount;
-      if (coverage >= 0.2) {
-        speaking.push({ id: pid, coverage, state: st });
-      }
-    }
-    if (speaking.length >= 2) {
-      // Dispara no contexto do participante atual (se estiver entre os que falam), senão no mais recente dos que falam
-      const target =
-        speaking.find((s) => s.id === participantId) ?? speaking.sort((a, b) => b.coverage - a.coverage)[0];
-      const type = 'overlap_fala';
-      if (this.inCooldown(target.state, type, now)) return;
-      this.setCooldown(target.state, type, now, 15000); // 15s
-      const name = this.index.getParticipantName(meetingId, target.id) ?? target.id;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: 'warning',
-        ts: now,
-        meetingId,
-        participantId: target.id,
-        window: { start: now - this.longWindowMs, end: now },
-        message: `${name} e outra pessoa falando ao mesmo tempo com frequência.`,
-        tips: ['Combine turnos de fala', 'Use levantar a mão'],
-        metadata: {
-          speechCoverage: speaking.find((s) => s.id === target.id)?.coverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  private evaluateMonologoProlongado(meetingId: string, now: number): void {
-    const participants = this.participantsForMeeting(meetingId);
-    if (participants.length === 0) return;
-    const horizonMs = 60000;
-    // Contagem de fala por participante nos últimos 60s
-    let totalSpeech = 0;
-    const counts: Array<{ id: string; speech: number; state: ParticipantState }> = [];
-    for (const [pid, st] of participants) {
-      let speech = 0;
-      const start = now - horizonMs;
-      for (let i = st.samples.length - 1; i >= 0; i--) {
-        const s = st.samples[i];
-        if (s.ts < start) break;
-        if (s.speech) {
-          speech++;
-          totalSpeech++;
-        }
-      }
-      counts.push({ id: pid, speech, state: st });
-    }
-    if (totalSpeech < 10) return; // poucos eventos, ignora
-    counts.sort((a, b) => b.speech - a.speech);
-    const top = counts[0];
-    if (!top || top.speech === 0) return;
-    const ratio = top.speech / totalSpeech;
-    if (ratio >= 0.8) {
-      const type = 'monologo_prolongado';
-      if (this.inCooldown(top.state, type, now)) return;
-      this.setCooldown(top.state, type, now, 30000); // 30s
-      const name = this.index.getParticipantName(meetingId, top.id) ?? top.id;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: 'warning',
-        ts: now,
-        meetingId,
-        participantId: top.id,
-        window: { start: now - horizonMs, end: now },
-        message: `${name}: fala dominante (≥80% nos últimos 60s).`,
-        tips: ['Convide outras pessoas a opinar'],
-        metadata: {
-          speechCoverage: ratio,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  private evaluateHostility(
-    meetingId: string,
-    participantId: string,
-    state: ParticipantState,
-    now: number,
-  ): void {
-    // Gate: Only require samples and emotions (NO speechCoverage gate) - prioritize emotional feedback
+  ): FeedbackEventPayload | null {
     const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return; // Need at least some samples
-    if (state.ema.emotions.size === 0) {
-      this.logger.debug(`[Hostility] ${participantId}: SKIPPED - no emotions in EMA (samplesCount=${w.samplesCount})`);
-      return; // Need emotions in EMA
-    }
+    if (w.samplesCount < 5) return null;
+    if (state.ema.emotions.size === 0) return null; // Requer emoções no EMA
 
+    // 1.1 Hostilidade (anger, disgust, distress)
+    const hostilityResult = this.detectHostility(meetingId, participantId, state, now, w);
+    if (hostilityResult) return hostilityResult;
+
+    // 1.2 Frustração (frustration direto)
+    const frustrationResult = this.detectFrustration(meetingId, participantId, state, now, w);
+    if (frustrationResult) return frustrationResult;
+
+    // 1.3 Tédio (boredom, tiredness + interest baixo)
+    const boredomResult = this.detectBoredom(meetingId, participantId, state, now, w);
+    if (boredomResult) return boredomResult;
+
+    // 1.4 Confusão (confusion, doubt)
+    const confusionResult = this.detectConfusion(meetingId, participantId, state, now, w);
+    if (confusionResult) return confusionResult;
+
+    // 1.5 Engajamento Positivo (interest, joy, determination)
+    const positiveResult = this.detectPositiveEngagement(meetingId, participantId, state, now, w);
+    if (positiveResult) return positiveResult;
+
+    return null;
+  }
+
+  private detectHostility(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+    w: ReturnType<typeof this.window>,
+  ): FeedbackEventPayload | null {
     const anger = state.ema.emotions.get('anger') ?? 0;
     const disgust = state.ema.emotions.get('disgust') ?? 0;
     const distress = state.ema.emotions.get('distress') ?? 0;
     const hostilityScore = Math.max(anger, disgust, distress);
 
-    // Log when close to threshold to diagnose
     if (hostilityScore > 0.03) {
-      this.logger.log(`[Hostility] ${participantId}: score=${hostilityScore.toFixed(3)} (anger=${anger.toFixed(3)}, disgust=${disgust.toFixed(3)}, distress=${distress.toFixed(3)}) threshold=0.05`);
+      this.logger.log(`[Hostility] ${participantId}: score=${hostilityScore.toFixed(3)} (anger=${anger.toFixed(3)}, disgust=${disgust.toFixed(3)}, distress=${distress.toFixed(3)}) threshold=${THRESHOLDS.primaryEmotion.hostility.anger}`);
     }
 
-    if (hostilityScore > 0.05) { // Reduced threshold based on observed scores (0.051 in logs)
+    if (hostilityScore > THRESHOLDS.primaryEmotion.hostility.anger) {
       const type = 'hostilidade';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 30000);
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.primaryEmotion.hostility);
       
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
       this.logger.log(`[Hostility] 🔥 TRIGGERED for ${participantId}: score=${hostilityScore.toFixed(3)}`);
-      const payload: FeedbackEventPayload = {
+      return {
         id: this.makeId(),
         type,
         severity: 'warning',
         ts: now,
         meetingId,
         participantId,
-        window: { start: now - this.longWindowMs, end: now },
+        window: { start: w.start, end: w.end },
         message: `${name}: a conversa esquentou. Considere validar o ponto do outro antes de prosseguir.`,
         tips: ['Respire fundo', 'Use frases como "Entendo seu ponto..."', 'Evite interrupções agora'],
         metadata: {
           valenceEMA: state.ema.valence,
         },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  private evaluateBoredom(
+  private detectFrustration(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    // Gate: Only require samples and emotions (NO speechCoverage gate) - prioritize emotional feedback
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return; // Need at least some samples
-    if (state.ema.emotions.size === 0) return; // Need emotions in EMA
-    
-    const boredom = state.ema.emotions.get('boredom') ?? 0;
-    const tiredness = state.ema.emotions.get('tiredness') ?? 0;
-    const interest = state.ema.emotions.get('interest') ?? 0;
-    
-    // Log when close to threshold to diagnose
-    if (boredom > 0.03 || tiredness > 0.05) {
-      this.logger.log(`[Boredom] ${participantId}: boredom=${boredom.toFixed(3)}, tiredness=${tiredness.toFixed(3)}, interest=${interest.toFixed(3)} thresholds=(0.05/0.08, interest<0.05)`);
-    }
-    
-    // High boredom/tiredness AND low interest (reduced thresholds)
-    if ((boredom > 0.05 || tiredness > 0.08) && interest < 0.05) {
-      const type = 'tedio';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 25000);
-
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      this.logger.log(`[Boredom] 😴 TRIGGERED for ${participantId}: boredom=${boredom.toFixed(3)}, tiredness=${tiredness.toFixed(3)}`);
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: 'info',
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start: now - this.longWindowMs, end: now },
-        message: `${name}: energia baixa detectada. Que tal trazer um novo ponto de vista?`,
-        tips: ['Mude a entonação', 'Faça uma pergunta aberta ao grupo'],
-        metadata: {
-          arousalEMA: state.ema.arousal,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  private evaluateFrustration(
-    meetingId: string,
-    participantId: string,
-    state: ParticipantState,
-    now: number,
-  ): void {
-    // Gate: Only require samples and emotions (NO speechCoverage gate) - prioritize emotional feedback
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return; // Need at least some samples
-    if (state.ema.emotions.size === 0) return; // Need emotions in EMA
-
-    // Direct frustration detection from Hume model
+    w: ReturnType<typeof this.window>,
+  ): FeedbackEventPayload | null {
     const frustration = state.ema.emotions.get('frustration') ?? 0;
     
-    // Log when close to threshold to diagnose
     if (frustration > 0.03) {
-      this.logger.log(`[Frustration] ${participantId}: score=${frustration.toFixed(3)} threshold=0.05`);
+      this.logger.log(`[Frustration] ${participantId}: score=${frustration.toFixed(3)} threshold=${THRESHOLDS.primaryEmotion.main}`);
     }
     
-    if (frustration > 0.05) { // Reduced threshold based on observed scores
+    if (frustration > THRESHOLDS.primaryEmotion.main) {
       const type = 'frustracao_crescente';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 25000);
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.primaryEmotion.frustration);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
       this.logger.log(`[Frustration] 😤 TRIGGERED for ${participantId}: score=${frustration.toFixed(3)}`);
-      const payload: FeedbackEventPayload = {
+      return {
         id: this.makeId(),
         type,
         severity: 'warning',
         ts: now,
         meetingId,
         participantId,
-        window: { start: now - this.longWindowMs, end: now },
+        window: { start: w.start, end: w.end },
         message: `${name}: parece haver um bloqueio ou frustração.`,
         tips: ['Reconheça a dificuldade', 'Pergunte: "O que está impedindo nosso progresso?"'],
         metadata: {
           valenceEMA: state.ema.valence,
         },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  private evaluateConfusion(
+  private detectBoredom(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    // Gate: Only require samples and emotions (NO speechCoverage gate) - prioritize emotional feedback
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return; // Need at least some samples
-    if (state.ema.emotions.size === 0) return; // Need emotions in EMA
-
-    const confusion = state.ema.emotions.get('confusion') ?? 0;
-    const doubt = state.ema.emotions.get('doubt') ?? 0;
-    const score = Math.max(confusion, doubt);
-
-    // Log when close to threshold to diagnose
-    if (score > 0.03) {
-      this.logger.log(`[Confusion] ${participantId}: score=${score.toFixed(3)} (confusion=${confusion.toFixed(3)}, doubt=${doubt.toFixed(3)}) threshold=0.05`);
+    w: ReturnType<typeof this.window>,
+  ): FeedbackEventPayload | null {
+    const boredom = state.ema.emotions.get('boredom') ?? 0;
+    const tiredness = state.ema.emotions.get('tiredness') ?? 0;
+    const interest = state.ema.emotions.get('interest') ?? 0;
+    
+    if (boredom > 0.03 || tiredness > 0.05) {
+      this.logger.log(`[Boredom] ${participantId}: boredom=${boredom.toFixed(3)}, tiredness=${tiredness.toFixed(3)}, interest=${interest.toFixed(3)}`);
     }
-
-    if (score > 0.05) { // Reduced threshold based on observed scores
-      const type = 'confusao';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 20000);
+    
+    const t = THRESHOLDS.primaryEmotion.boredom;
+    if ((boredom > t.boredom || tiredness > t.tiredness) && interest < t.interestLow) {
+      const type = 'tedio';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.primaryEmotion.boredom);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      this.logger.log(`[Confusion] 🤔 TRIGGERED for ${participantId}: score=${score.toFixed(3)}`);
-      const payload: FeedbackEventPayload = {
+      this.logger.log(`[Boredom] 😴 TRIGGERED for ${participantId}: boredom=${boredom.toFixed(3)}, tiredness=${tiredness.toFixed(3)}`);
+      return {
         id: this.makeId(),
         type,
         severity: 'info',
         ts: now,
         meetingId,
         participantId,
-        window: { start: now - this.longWindowMs, end: now },
-        message: `${name}: pontos de dúvida detectados. Seria bom checar o entendimento.`,
-        tips: ['Pergunte: "Isso faz sentido?"', 'Ofereça um exemplo prático'],
-        metadata: {},
+        window: { start: w.start, end: w.end },
+        message: `${name}: energia baixa detectada. Que tal trazer um novo ponto de vista?`,
+        tips: ['Mude a entonação', 'Faça uma pergunta aberta ao grupo'],
+        metadata: {
+          arousalEMA: state.ema.arousal,
+        },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  private evaluatePositiveEngagement(
+  private detectConfusion(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    // Gate: Only require samples and emotions (NO speechCoverage gate) - prioritize emotional feedback
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return; // Need at least some samples
-    if (state.ema.emotions.size === 0) return; // Need emotions in EMA
+    w: ReturnType<typeof this.window>,
+  ): FeedbackEventPayload | null {
+    const confusion = state.ema.emotions.get('confusion') ?? 0;
+    const doubt = state.ema.emotions.get('doubt') ?? 0;
+    const score = Math.max(confusion, doubt);
 
+    if (score > 0.03) {
+      this.logger.log(`[Confusion] ${participantId}: score=${score.toFixed(3)} (confusion=${confusion.toFixed(3)}, doubt=${doubt.toFixed(3)}) threshold=${THRESHOLDS.primaryEmotion.confusion.confusion}`);
+    }
+
+    if (score > THRESHOLDS.primaryEmotion.confusion.confusion) {
+      const type = 'confusao';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.primaryEmotion.confusion);
+
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      this.logger.log(`[Confusion] 🤔 TRIGGERED for ${participantId}: score=${score.toFixed(3)}`);
+      return {
+        id: this.makeId(),
+        type,
+        severity: 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: w.start, end: w.end },
+        message: `${name}: pontos de dúvida detectados. Seria bom checar o entendimento.`,
+        tips: ['Pergunte: "Isso faz sentido?"', 'Ofereça um exemplo prático'],
+        metadata: {},
+      };
+    }
+    return null;
+  }
+
+  private detectPositiveEngagement(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+    w: ReturnType<typeof this.window>,
+  ): FeedbackEventPayload | null {
     const interest = state.ema.emotions.get('interest') ?? 0;
     const joy = state.ema.emotions.get('joy') ?? 0;
     const determination = state.ema.emotions.get('determination') ?? 0;
     const score = Math.max(interest, joy, determination);
 
-    // Log when close to threshold to diagnose
     if (score > 0.03) {
-      this.logger.log(`[PositiveEngagement] ${participantId}: score=${score.toFixed(3)} (interest=${interest.toFixed(3)}, joy=${joy.toFixed(3)}, determination=${determination.toFixed(3)}) threshold=0.05`);
+      this.logger.log(`[PositiveEngagement] ${participantId}: score=${score.toFixed(3)} (interest=${interest.toFixed(3)}, joy=${joy.toFixed(3)}, determination=${determination.toFixed(3)}) threshold=${THRESHOLDS.primaryEmotion.main}`);
     }
 
-    if (score > 0.05) { // Reduced threshold based on observed scores
-      const type = 'entusiasmo_alto'; // Reuse existing type
-      // Longer cooldown to not spam praise
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 60000);
+    if (score > THRESHOLDS.primaryEmotion.main) {
+      const type = 'entusiasmo_alto';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.primaryEmotion.positiveEngagement);
 
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
       this.logger.log(`[PositiveEngagement] 🎉 TRIGGERED for ${participantId}: score=${score.toFixed(3)}`);
-      const payload: FeedbackEventPayload = {
+      return {
         id: this.makeId(),
         type,
         severity: 'info',
         ts: now,
         meetingId,
         participantId,
-        window: { start: now - this.longWindowMs, end: now },
+        window: { start: w.start, end: w.end },
         message: `${name}: ótima energia e clareza! O grupo parece engajado.`,
         tips: ['Mantenha esse tom', 'Aproveite para definir próximos passos'],
         metadata: {},
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  // Novas heurísticas baseadas em sentimento/arousal
-  // (Mantidas como fallback ou removidas se totalmente substituídas)
-  private evaluateTendenciaEmocionalNegativa(
+  // ===================================================================
+  // CAMADA 2: META-ESTADOS EMOCIONAIS (Combinações)
+  // ===================================================================
+  /**
+   * Detecta estados emocionais complexos através de combinações lógicas
+   * entre sinais primários. Só executa se Camada 1 não retornou feedback.
+   */
+  private detectMetaStates(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    // Deprecated by evaluateHostility
-    // Keeping logic active only if emotions map is empty (fallback mode)
-    if (state.ema.emotions.size > 0) return;
+  ): FeedbackEventPayload | null {
+    // 2.1 Frustração Crescente (tendência: arousal↑ + valence↓)
+    const frustrationTrendResult = this.detectFrustrationTrend(meetingId, participantId, state, now);
+    if (frustrationTrendResult) return frustrationTrendResult;
 
-    const val = state.ema.valence;
-    if (typeof val !== 'number') return;
-    // Requer fala razoável na janela longa
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return;
-    const speechCoverage = w.speechCount / w.samplesCount;
-    if (speechCoverage < 0.4) return;
-    // Thresholds para valence em [-1,1]
-    const type = 'tendencia_emocional_negativa';
-    if (val <= -0.6 || val <= -0.35) {
-      if (this.inCooldown(state, type, now)) return;
-      const severe = val <= -0.6;
-      this.setCooldown(state, type, now, severe ? 25000 : 20000);
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: severe ? 'warning' : 'info',
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start: now - this.longWindowMs, end: now },
-        message: severe
-          ? `${name}: tom negativo perceptível. Considere suavizar a comunicação.`
-          : `${name}: tendência emocional negativa. Tente um tom mais positivo.`,
-        tips: ['Mostre concordância antes de divergir', 'Evite frases muito secas'],
-        metadata: {
-          valenceEMA: val,
-          speechCoverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
+    // 2.2 Efeito Pós-Interrupção (queda de valence após interrupção)
+    const postInterruptionResult = this.detectPostInterruption(meetingId, now);
+    if (postInterruptionResult) return postInterruptionResult;
+
+    // 2.3 Polarização Emocional (divisão do grupo)
+    const polarizationResult = this.detectPolarization(meetingId, now);
+    if (polarizationResult) return polarizationResult;
+
+    return null;
   }
 
-  private evaluateEngajamentoBaixo(
+  private detectFrustrationTrend(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    // Deprecated by evaluateBoredom
-    if (state.ema.emotions.size > 0) return;
-
-    const ar = state.ema.arousal;
-    if (typeof ar !== 'number') return;
-    // Requer fala moderada na janela longa
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return;
-    const speechCoverage = w.speechCount / w.samplesCount;
-    if (speechCoverage < 0.3) return;
-    // Thresholds para arousal em [-1,1]
-    const type = 'engajamento_baixo';
-    if (ar <= -0.4 || ar <= -0.2) {
-      if (this.inCooldown(state, type, now)) return;
-      const warn = ar <= -0.4;
-      this.setCooldown(state, type, now, warn ? 20000 : 15000);
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: warn ? 'warning' : 'info',
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start: now - this.longWindowMs, end: now },
-        message: warn
-          ? `${name}: engajamento baixo (tom desanimado).`
-          : `${name}: energia baixa. Um pouco mais de ênfase pode ajudar.`,
-        tips: ['Fale com mais variação de tom', 'Projete a voz mais próxima do microfone'],
-        metadata: {
-          arousalEMA: ar,
-          speechCoverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  private evaluateFrustracaoCrescente(
-    meetingId: string,
-    participantId: string,
-    state: ParticipantState,
-    now: number,
-  ): void {
-    // Deprecated by evaluateFrustration
-    if (state.ema.emotions.size > 0) return;
+  ): FeedbackEventPayload | null {
+    // Só executa se não há emoções primárias (fallback)
+    if (state.ema.emotions.size > 0) return null;
 
     const start = now - this.trendWindowMs;
     let arousalEarlySum = 0;
@@ -687,11 +580,13 @@ export class FeedbackAggregatorService {
     let valenceLateSum = 0;
     let valenceLateN = 0;
     let speechN = 0;
+    
     for (let i = state.samples.length - 1; i >= 0; i--) {
       const s = state.samples[i];
       if (s.ts < start) break;
       if (s.speech) speechN++;
-      if (s.ts < now - this.trendWindowMs / 2) {
+      const isEarly = s.ts < now - this.trendWindowMs / 2;
+      if (isEarly) {
         if (typeof s.arousal === 'number') {
           arousalEarlySum += s.arousal;
           arousalEarlyN++;
@@ -711,22 +606,29 @@ export class FeedbackAggregatorService {
         }
       }
     }
+    
     const totalN = arousalEarlyN + arousalLateN + valenceEarlyN + valenceLateN;
-    if (speechN < 5 || totalN < 8) return;
+    if (speechN < 5 || totalN < 8) return null;
+    
     const arousalEarly = arousalEarlyN > 0 ? arousalEarlySum / arousalEarlyN : undefined;
     const arousalLate = arousalLateN > 0 ? arousalLateSum / arousalLateN : undefined;
     const valenceEarly = valenceEarlyN > 0 ? valenceEarlySum / valenceEarlyN : undefined;
     const valenceLate = valenceLateN > 0 ? valenceLateSum / valenceLateN : undefined;
-    if (typeof arousalEarly !== 'number' || typeof arousalLate !== 'number') return;
-    if (typeof valenceEarly !== 'number' || typeof valenceLate !== 'number') return;
+    
+    if (typeof arousalEarly !== 'number' || typeof arousalLate !== 'number') return null;
+    if (typeof valenceEarly !== 'number' || typeof valenceLate !== 'number') return null;
+    
     const arousalDelta = arousalLate - arousalEarly;
     const valenceDelta = valenceLate - valenceEarly;
-    if (arousalDelta >= 0.25 && valenceDelta <= -0.2) {
+    const t = THRESHOLDS.meta.frustrationTrend;
+    
+    if (arousalDelta >= t.arousalDelta && valenceDelta <= t.valenceDelta) {
       const type = 'frustracao_crescente';
-      if (this.inCooldown(state, type, now)) return;
-      this.setCooldown(state, type, now, 25000);
+      if (this.inCooldown(state, type, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.meta.frustrationTrend);
+      
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
+      return {
         id: this.makeId(),
         type,
         severity: 'warning',
@@ -741,76 +643,272 @@ export class FeedbackAggregatorService {
           valenceEMA: state.ema.valence,
         },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  private evaluateEntusiasmoAlto(
+  private detectPostInterruption(meetingId: string, now: number): FeedbackEventPayload | null {
+    const list = this.postInterruptionCandidatesByMeeting.get(meetingId);
+    if (!list || list.length === 0) return null;
+    
+    const t = THRESHOLDS.meta.postInterruption;
+    const remaining: Array<{ ts: number; interruptedId: string; valenceBefore?: number }> = [];
+    
+    for (const rec of list) {
+      const age = now - rec.ts;
+      if (age < t.windowMin) {
+        remaining.push(rec);
+        continue;
+      }
+      if (age > t.windowMax) {
+        continue; // expired
+      }
+      
+      const st = this.byKey.get(this.key(meetingId, rec.interruptedId));
+      if (!st || typeof st.ema.valence !== 'number' || typeof rec.valenceBefore !== 'number') {
+        remaining.push(rec);
+        continue;
+      }
+      
+      const delta = st.ema.valence - rec.valenceBefore;
+      const w = this.window(st, now, this.longWindowMs);
+      const coverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
+      
+      if (delta <= t.valenceDelta && coverage >= t.minCoverage) {
+        const type = 'efeito_pos_interrupcao';
+        if (!this.inCooldown(st, type, now)) {
+          this.setCooldown(st, type, now, THRESHOLDS.cooldowns.meta.postInterruption);
+          const name = this.index.getParticipantName(meetingId, rec.interruptedId) ?? rec.interruptedId;
+          return {
+            id: this.makeId(),
+            type,
+            severity: 'warning',
+            ts: now,
+            meetingId,
+            participantId: rec.interruptedId,
+            window: { start: rec.ts, end: now },
+            message: `${name}: queda de ânimo após interrupção.`,
+            tips: ['Convide a concluir a ideia interrompida', 'Garanta espaço de fala'],
+            metadata: {
+              valenceEMA: st.ema.valence,
+            },
+          };
+        }
+      } else {
+        remaining.push(rec);
+      }
+    }
+    
+    this.postInterruptionCandidatesByMeeting.set(meetingId, remaining);
+    return null;
+  }
+
+  private detectPolarization(meetingId: string, now: number): FeedbackEventPayload | null {
+    const participants = this.participantsForMeeting(meetingId);
+    const t = THRESHOLDS.meta.polarization;
+    if (participants.length < t.minParticipants) return null;
+    
+    const negVals: number[] = [];
+    const posVals: number[] = [];
+    
+    for (const [pid, st] of participants) {
+      if (this.index.getParticipantRole(meetingId, pid) === 'host') continue;
+      const w = this.window(st, now, this.longWindowMs);
+      if (w.samplesCount === 0) continue;
+      const coverage = w.speechCount / w.samplesCount;
+      if (coverage < THRESHOLDS.speechGates.prosodic) continue;
+      
+      const v = st.ema.valence;
+      if (typeof v !== 'number') continue;
+      if (v <= t.valenceNegative) negVals.push(v);
+      if (v >= t.valencePositive) posVals.push(v);
+    }
+    
+    if (negVals.length === 0 || posVals.length === 0) return null;
+    
+    const mean = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+    const negMean = mean(negVals);
+    const posMean = mean(posVals);
+    
+    if (posMean - negMean >= t.difference) {
+      const type = 'polarizacao_emocional';
+      if (this.inCooldownMeeting(meetingId, type, now)) return null;
+      this.setCooldownMeeting(meetingId, type, now, THRESHOLDS.cooldowns.meta.polarization);
+      
+      return {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId: 'group',
+        window: { start: now - this.longWindowMs, end: now },
+        message: `Polarização emocional no grupo (opiniões muito divergentes).`,
+        tips: ['Reconheça pontos de ambos os lados', 'Estabeleça objetivos comuns antes de decidir'],
+        metadata: {
+          valenceEMA: Number(((posMean + negMean) / 2).toFixed(3)),
+        },
+      };
+    }
+    return null;
+  }
+
+  // ===================================================================
+  // CAMADA 3: SINAIS PROSÓDICOS (Arousal, Valence, Energia)
+  // ===================================================================
+  /**
+   * Detecta sinais prosódicos baseados em métricas acústicas.
+   * Só executa se Camadas 1 e 2 não retornaram feedback.
+   * NÃO duplica emoções primárias (ex: excitement vs arousal alto).
+   */
+  private detectProsodicSignals(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
-    const ar = state.ema.arousal;
-    if (typeof ar !== 'number') return;
-    const w = this.window(state, now, this.longWindowMs);
-    if (w.samplesCount < 5) return;
+  ): FeedbackEventPayload | null {
+    // 3.1 Volume (RMS)
+    const volumeResult = this.detectVolume(meetingId, participantId, state, now);
+    if (volumeResult) return volumeResult;
+
+    // 3.2 Monotonia Prosódica (variância de arousal)
+    const monotonyResult = this.detectMonotony(meetingId, participantId, state, now);
+    if (monotonyResult) return monotonyResult;
+
+    // 3.3 Ritmo (acelerado/pausado)
+    const rhythmResult = this.detectRhythm(meetingId, participantId, state, now);
+    if (rhythmResult) return rhythmResult;
+
+    // 3.4 Arousal (alto/baixo) - só se não há emoções primárias
+    if (state.ema.emotions.size === 0) {
+      const arousalResult = this.detectArousal(meetingId, participantId, state, now);
+      if (arousalResult) return arousalResult;
+    }
+
+    // 3.5 Valence (negativo) - só se não há emoções primárias
+    if (state.ema.emotions.size === 0) {
+      const valenceResult = this.detectValence(meetingId, participantId, state, now);
+      if (valenceResult) return valenceResult;
+    }
+
+    // 3.6 Energia do Grupo (arousal médio)
+    const groupEnergyResult = this.detectGroupEnergy(meetingId, now);
+    if (groupEnergyResult) return groupEnergyResult;
+
+    return null;
+  }
+
+  private detectVolume(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): FeedbackEventPayload | null {
+    const w = this.window(state, now, this.shortWindowMs);
+    if (w.samplesCount < 1) return null;
     const speechCoverage = w.speechCount / w.samplesCount;
-    if (speechCoverage < 0.5) return;
-    if (ar >= 0.5) {
-      const type = 'entusiasmo_alto';
-      if (this.inCooldown(state, type, now)) return;
-      const severity: 'info' | 'warning' = ar >= 0.7 ? 'warning' : 'info';
-      this.setCooldown(state, type, now, severity === 'warning' ? 20000 : 15000);
+    if (speechCoverage < THRESHOLDS.speechGates.volume) return null;
+    
+    const mean = w.meanRmsDbfs;
+    const ema = state.ema.rms;
+    const level = typeof mean === 'number' ? mean : typeof ema === 'number' ? ema : undefined;
+    if (typeof level !== 'number') return null;
+
+    const t = THRESHOLDS.prosodic.volume;
+    const isLow = level <= t.low;
+    const isHigh = level >= t.high;
+
+    if (isLow && isHigh) return null; // Conflito impossível
+
+    if (isLow) {
+      const type = 'volume_baixo';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      const severity = level <= t.lowCritical ? 'critical' : 'warning';
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.prosodic.volume);
+      
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
+      return {
         id: this.makeId(),
         type,
         severity,
         ts: now,
         meetingId,
         participantId,
-        window: { start: now - this.longWindowMs, end: now },
-        message:
-          severity === 'warning'
-            ? `${name}: energia muito alta; canalize em próximos passos.`
-            : `${name}: entusiasmo alto; ótimo momento para direcionar ações.`,
-        tips: ['Direcione para decisões e próximos passos'],
+        window: { start: w.start, end: w.end },
+        message: severity === 'critical'
+          ? `${name}: quase inaudível; aumente o ganho imediatamente.`
+          : `${name}: volume baixo; aproxime-se do microfone.`,
+        tips: severity === 'critical'
+          ? ['Aumente o ganho de entrada', 'Aproxime-se do microfone']
+          : ['Verifique entrada de áudio', 'Desative redução agressiva de ruído'],
         metadata: {
-          arousalEMA: ar,
+          rmsDbfs: level,
           speechCoverage,
         },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+
+    if (isHigh) {
+      const type = 'volume_alto';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      const severity = level >= t.highCritical ? 'critical' : 'warning';
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.prosodic.volume);
+      
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: w.start, end: w.end },
+        message: severity === 'critical'
+          ? `${name}: áudio clipando; reduza o ganho.`
+          : `${name}: volume alto; afaste-se um pouco.`,
+        tips: ['Reduza sensibilidade do microfone'],
+        metadata: {
+          rmsDbfs: level,
+          speechCoverage,
+        },
+      };
+    }
+
+    return null;
   }
 
-  private evaluateMonotoniaProsodica(
+  private detectMonotony(
     meetingId: string,
     participantId: string,
     state: ParticipantState,
     now: number,
-  ): void {
+  ): FeedbackEventPayload | null {
     const start = now - this.longWindowMs;
     const values: number[] = [];
     let speechN = 0;
+    
     for (let i = state.samples.length - 1; i >= 0; i--) {
       const s = state.samples[i];
       if (s.ts < start) break;
       if (s.speech) speechN++;
       if (typeof s.arousal === 'number') values.push(s.arousal);
     }
-    if (speechN < 5 || values.length < 5) return;
+    
+    if (speechN < 5 || values.length < 5) return null;
+    
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     const variance = values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / values.length;
     const stdev = Math.sqrt(variance);
-    const type = 'monotonia_prosodica';
-    if (stdev < 0.1) {
-      if (this.inCooldown(state, type, now)) return;
-      const severity: 'info' | 'warning' = stdev < 0.06 ? 'warning' : 'info';
-      this.setCooldown(state, type, now, 20000);
+    
+    const t = THRESHOLDS.prosodic.monotony;
+    if (stdev < t.stdevInfo) {
+      const type = 'monotonia_prosodica';
+      if (this.inCooldown(state, type, now)) return null;
+      const severity: 'info' | 'warning' = stdev < t.stdevWarning ? 'warning' : 'info';
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.prosodic.monotony);
+      
       const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
+      return {
         id: this.makeId(),
         type,
         severity,
@@ -818,45 +916,295 @@ export class FeedbackAggregatorService {
         meetingId,
         participantId,
         window: { start, end: now },
-        message:
-          severity === 'warning'
-            ? `${name}: fala monótona; varie entonação e pausas.`
-            : `${name}: pouca variação de entonação.`,
+        message: severity === 'warning'
+          ? `${name}: fala monótona; varie entonação e pausas.`
+          : `${name}: pouca variação de entonação.`,
         tips: ['Use pausas e ênfases para destacar pontos'],
         metadata: {
           arousalEMA: state.ema.arousal,
         },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  private evaluateEnergiaGrupoBaixa(meetingId: string, now: number): void {
+  private detectRhythm(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): FeedbackEventPayload | null {
+    const start = now - this.longWindowMs;
+    const samples = state.samples.filter((s) => s.ts >= start);
+    if (samples.length < 6) return null;
+    
+    let switches = 0;
+    let speechSegments = 0;
+    let longestSilence = 0;
+    let currentIsSpeech: boolean | undefined = undefined;
+    let currentStart = start;
+    let lastTs = start;
+    
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      const segDur = (s.ts - lastTs) / 1000;
+      if (typeof currentIsSpeech === 'boolean' && !currentIsSpeech) {
+        if (segDur > longestSilence) longestSilence = segDur;
+      }
+      if (typeof currentIsSpeech !== 'boolean') {
+        currentIsSpeech = s.speech;
+        currentStart = s.ts;
+        lastTs = s.ts;
+        continue;
+      }
+      if (s.speech !== currentIsSpeech) {
+        switches++;
+        const dur = (s.ts - currentStart) / 1000;
+        if (currentIsSpeech) {
+          speechSegments++;
+        } else {
+          if (dur > longestSilence) longestSilence = dur;
+        }
+        currentIsSpeech = s.speech;
+        currentStart = s.ts;
+      }
+      lastTs = s.ts;
+    }
+    
+    const tailDur = (now - currentStart) / 1000;
+    if (currentIsSpeech) {
+      speechSegments++;
+    } else {
+      if (tailDur > longestSilence) longestSilence = tailDur;
+    }
+    
+    const windowSec = this.longWindowMs / 1000;
+    const switchesPerSec = switches / windowSec;
+    const w = this.window(state, now, this.longWindowMs);
+    const speechCoverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
+
+    const hasSpokenBefore = state.samples.some(s => s.speech);
+    if (!hasSpokenBefore) return null;
+
+    const tAccel = THRESHOLDS.prosodic.rhythm.accelerated;
+    const tPaused = THRESHOLDS.prosodic.rhythm.paused;
+    const isAccelerated = switchesPerSec >= tAccel.switchesPerSec && speechSegments >= tAccel.minSegments;
+    const isPaused = longestSilence >= tPaused.longestSilence && speechCoverage < tPaused.minCoverage;
+
+    if (isAccelerated && isPaused) return null; // Conflito: ignorar ambos
+
+    if (isAccelerated) {
+      const type = 'ritmo_acelerado';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.prosodic.rhythmAccelerated);
+      const severity: 'info' | 'warning' = switchesPerSec >= tAccel.warningThreshold ? 'warning' : 'info';
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start, end: now },
+        message: severity === 'warning'
+          ? `${name}: ritmo acelerado; desacelere para melhor entendimento.`
+          : `${name}: ritmo rápido; considere pausas curtas.`,
+        tips: ['Faça pausas para respiração', 'Enuncie com clareza'],
+        metadata: {
+          speechCoverage,
+        },
+      };
+    }
+
+    if (isPaused) {
+      const type = 'ritmo_pausado';
+      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+      this.setCooldown(state, type, now, THRESHOLDS.cooldowns.prosodic.rhythmPaused);
+      const severity: 'info' | 'warning' = longestSilence >= tPaused.warningThreshold ? 'warning' : 'info';
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start, end: now },
+        message: severity === 'warning'
+          ? `${name}: pausas muito longas (≥7s); tente manter um ritmo mais constante.`
+          : `${name}: ritmo lento; considere reduzir pausas longas.`,
+        tips: ['Reduza pausas longas', 'Mantenha frases mais curtas'],
+        metadata: {
+          speechCoverage,
+        },
+      };
+    }
+
+    return null;
+  }
+
+  private detectArousal(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): FeedbackEventPayload | null {
+    const ar = state.ema.arousal;
+    if (typeof ar !== 'number') return null;
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5) return null;
+    const speechCoverage = w.speechCount / w.samplesCount;
+    if (speechCoverage < THRESHOLDS.speechGates.prosodicVeryStrict) return null;
+    
+    const t = THRESHOLDS.prosodic.arousal;
+    if (ar >= t.high) {
+      const type = 'entusiasmo_alto';
+      if (this.inCooldown(state, type, now)) return null;
+      const severity: 'info' | 'warning' = ar >= t.highWarning ? 'warning' : 'info';
+      this.setCooldown(state, type, now, severity === 'warning' ? 20000 : THRESHOLDS.cooldowns.prosodic.arousal);
+      
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity,
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: w.start, end: w.end },
+        message: severity === 'warning'
+          ? `${name}: energia muito alta; canalize em próximos passos.`
+          : `${name}: entusiasmo alto; ótimo momento para direcionar ações.`,
+        tips: ['Direcione para decisões e próximos passos'],
+        metadata: {
+          arousalEMA: ar,
+          speechCoverage,
+        },
+      };
+    }
+    
+    if (ar <= t.low || ar <= t.lowInfo) {
+      const type = 'engajamento_baixo';
+      if (this.inCooldown(state, type, now)) return null;
+      const warn = ar <= t.low;
+      this.setCooldown(state, type, now, warn ? 20000 : THRESHOLDS.cooldowns.prosodic.arousal);
+      
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity: warn ? 'warning' : 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: w.start, end: w.end },
+        message: warn
+          ? `${name}: engajamento baixo (tom desanimado).`
+          : `${name}: energia baixa. Um pouco mais de ênfase pode ajudar.`,
+        tips: ['Fale com mais variação de tom', 'Projete a voz mais próxima do microfone'],
+        metadata: {
+          arousalEMA: ar,
+          speechCoverage,
+        },
+      };
+    }
+    
+    return null;
+  }
+
+  private detectValence(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): FeedbackEventPayload | null {
+    const val = state.ema.valence;
+    if (typeof val !== 'number') return null;
+    const w = this.window(state, now, this.longWindowMs);
+    if (w.samplesCount < 5) return null;
+    const speechCoverage = w.speechCount / w.samplesCount;
+    if (speechCoverage < THRESHOLDS.speechGates.prosodicStrict) return null;
+    
+    const t = THRESHOLDS.prosodic.valence;
+    // CORRIGIDO: Removida condição redundante
+    if (val <= t.negativeSevere) {
+      const type = 'tendencia_emocional_negativa';
+      if (this.inCooldown(state, type, now)) return null;
+      this.setCooldown(state, type, now, 25000);
+      
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: w.start, end: w.end },
+        message: `${name}: tom negativo perceptível. Considere suavizar a comunicação.`,
+        tips: ['Mostre concordância antes de divergir', 'Evite frases muito secas'],
+        metadata: {
+          valenceEMA: val,
+          speechCoverage,
+        },
+      };
+    } else if (val <= t.negativeInfo) {
+      const type = 'tendencia_emocional_negativa';
+      if (this.inCooldown(state, type, now)) return null;
+      this.setCooldown(state, type, now, 20000);
+      
+      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+      return {
+        id: this.makeId(),
+        type,
+        severity: 'info',
+        ts: now,
+        meetingId,
+        participantId,
+        window: { start: w.start, end: w.end },
+        message: `${name}: tendência emocional negativa. Tente um tom mais positivo.`,
+        tips: ['Mostre concordância antes de divergir', 'Evite frases muito secas'],
+        metadata: {
+          valenceEMA: val,
+          speechCoverage,
+        },
+      };
+    }
+    
+    return null;
+  }
+
+  private detectGroupEnergy(meetingId: string, now: number): FeedbackEventPayload | null {
     const participants = this.participantsForMeeting(meetingId);
-    if (participants.length === 0) return;
+    if (participants.length === 0) return null;
+    
     let sum = 0;
     let n = 0;
     for (const [pid, st] of participants) {
-      // ignore host if role is host
       const role = this.index.getParticipantRole(meetingId, pid);
       if (role === 'host') continue;
       const w = this.window(st, now, this.longWindowMs);
       if (w.samplesCount === 0) continue;
       const coverage = w.speechCount / w.samplesCount;
-      if (coverage < 0.3) continue;
+      if (coverage < THRESHOLDS.speechGates.prosodic) continue;
       if (typeof st.ema.arousal === 'number') {
         sum += st.ema.arousal;
         n++;
       }
     }
-    if (n === 0) return;
+    
+    if (n === 0) return null;
     const mean = sum / n;
-    if (mean <= -0.3) {
+    const t = THRESHOLDS.prosodic.groupEnergy;
+    
+    if (mean <= t.low) {
       const type = 'energia_grupo_baixa';
-      if (this.inCooldownMeeting(meetingId, type, now)) return;
-      const severity: 'info' | 'warning' = mean <= -0.5 ? 'warning' : 'info';
-      this.setCooldownMeeting(meetingId, type, now, 30000);
-      const payload: FeedbackEventPayload = {
+      if (this.inCooldownMeeting(meetingId, type, now)) return null;
+      const severity: 'info' | 'warning' = mean <= t.lowWarning ? 'warning' : 'info';
+      this.setCooldownMeeting(meetingId, type, now, THRESHOLDS.cooldowns.prosodic.groupEnergy);
+      
+      return {
         id: this.makeId(),
         type,
         severity,
@@ -864,25 +1212,136 @@ export class FeedbackAggregatorService {
         meetingId,
         participantId: 'group',
         window: { start: now - this.longWindowMs, end: now },
-        message:
-          severity === 'warning'
-            ? `Energia do grupo baixa. Considere perguntas diretas ou mudança de dinâmica.`
-            : `Energia do grupo em queda. Estimule participação.`,
+        message: severity === 'warning'
+          ? `Energia do grupo baixa. Considere perguntas diretas ou mudança de dinâmica.`
+          : `Energia do grupo em queda. Estimule participação.`,
         tips: ['Convide pessoas específicas a opinar', 'Introduza uma pergunta aberta'],
         metadata: {
           arousalEMA: mean,
         },
       };
-      this.delivery.publishToHosts(meetingId, payload);
     }
+    return null;
   }
 
-  private evaluateInterrupcoesFrequentes(meetingId: string, participantId: string, now: number): void {
+  // ===================================================================
+  // CAMADA 4: ESTADOS DE LONGO PRAZO (Comportamentais)
+  // ===================================================================
+  /**
+   * Detecta padrões comportamentais de longo prazo.
+   * Menor prioridade - só executa se camadas 1-3 não retornaram feedback.
+   */
+  private detectLongTermSignals(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): FeedbackEventPayload | null {
+    // 4.1 Silêncio Prolongado
+    const silenceResult = this.detectSilence(meetingId, participantId, state, now);
+    if (silenceResult) return silenceResult;
+
+    // 4.2 Overlap de Fala
+    const overlapResult = this.detectOverlap(meetingId, participantId, now);
+    if (overlapResult) return overlapResult;
+
+    // 4.3 Interrupções Frequentes
+    const interruptionsResult = this.detectInterruptions(meetingId, participantId, now);
+    if (interruptionsResult) return interruptionsResult;
+
+    return null;
+  }
+
+  private detectSilence(
+    meetingId: string,
+    participantId: string,
+    state: ParticipantState,
+    now: number,
+  ): FeedbackEventPayload | null {
+    const t = THRESHOLDS.longTerm.silence;
+    const window = this.window(state, now, t.windowMs);
+    if (window.samplesCount < t.minSamples) return null;
+    
+    const speechCoverage = window.speechCount / window.samplesCount;
+    if (speechCoverage >= t.speechCoverage) return null;
+    
+    const hasSpokenBefore = state.samples.some(s => s.speech);
+    if (!hasSpokenBefore) return null;
+    
+    const rms = window.meanRmsDbfs;
+    const isMicPossiblyMuted = typeof rms !== 'number' || rms <= t.rmsThreshold;
+    if (!isMicPossiblyMuted) return null;
+    
+    const type = 'silencio_prolongado';
+    if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return null;
+    this.setCooldown(state, type, now, THRESHOLDS.cooldowns.longTerm.silence);
+    
+    const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
+    return {
+      id: this.makeId(),
+      type,
+      severity: 'warning',
+      ts: now,
+      meetingId,
+      participantId,
+      window: { start: window.start, end: window.end },
+      message: `${name}: sem áudio há 60s; microfone pode estar desconectado.`,
+      tips: ['Verifique se o microfone está conectado', 'Cheque as permissões de áudio'],
+      metadata: {
+        speechCoverage,
+        rmsDbfs: rms,
+      },
+    };
+  }
+
+  private detectOverlap(meetingId: string, participantId: string, now: number): FeedbackEventPayload | null {
     const participants = this.participantsForMeeting(meetingId);
-    if (participants.length < 2) return;
-    // Determine if there is overlap in the short window
+    const t = THRESHOLDS.longTerm.overlap;
+    if (participants.length < t.minParticipants) return null;
+    
+    const speaking: Array<{ id: string; coverage: number; state: ParticipantState }> = [];
+    for (const [pid, st] of participants) {
+      const w = this.window(st, now, this.longWindowMs);
+      if (w.samplesCount === 0) continue;
+      const coverage = w.speechCount / w.samplesCount;
+      if (coverage >= t.minCoverage) {
+        speaking.push({ id: pid, coverage, state: st });
+      }
+    }
+    
+    if (speaking.length >= t.minParticipants) {
+      const target = speaking.find((s) => s.id === participantId) ?? speaking.sort((a, b) => b.coverage - a.coverage)[0];
+      const type = 'overlap_fala';
+      if (this.inCooldown(target.state, type, now)) return null;
+      this.setCooldown(target.state, type, now, THRESHOLDS.cooldowns.longTerm.overlap);
+      
+      const name = this.index.getParticipantName(meetingId, target.id) ?? target.id;
+      return {
+        id: this.makeId(),
+        type,
+        severity: 'warning',
+        ts: now,
+        meetingId,
+        participantId: target.id,
+        window: { start: now - this.longWindowMs, end: now },
+        message: `${name} e outra pessoa falando ao mesmo tempo com frequência.`,
+        tips: ['Combine turnos de fala', 'Use levantar a mão'],
+        metadata: {
+          speechCoverage: speaking.find((s) => s.id === target.id)?.coverage,
+        },
+      };
+    }
+    return null;
+  }
+
+  private detectInterruptions(meetingId: string, participantId: string, now: number): FeedbackEventPayload | null {
+    const participants = this.participantsForMeeting(meetingId);
+    if (participants.length < 2) return null;
+    
+    const t = THRESHOLDS.longTerm.interruptions;
     let speakingCount = 0;
     const covers: Array<{ id: string; coverage: number }> = [];
+    
     for (const [pid, st] of participants) {
       const w = this.window(st, now, this.shortWindowMs);
       if (w.samplesCount === 0) continue;
@@ -890,18 +1349,19 @@ export class FeedbackAggregatorService {
       covers.push({ id: pid, coverage });
       if (coverage >= 0.2) speakingCount++;
     }
+    
     const keyThrottle = meetingId;
     if (speakingCount >= 2) {
       const lastAt = this.lastOverlapSampleAtByMeeting.get(keyThrottle) ?? 0;
-      if (now - lastAt >= 2000) {
+      if (now - lastAt >= t.throttleMs) {
         this.lastOverlapSampleAtByMeeting.set(keyThrottle, now);
         const arr = this.overlapHistoryByMeeting.get(meetingId) ?? [];
         arr.push(now);
-        // prune older than 60s
-        const cutoff = now - 60000;
+        const cutoff = now - t.windowMs;
         while (arr.length > 0 && arr[0] < cutoff) arr.shift();
         this.overlapHistoryByMeeting.set(meetingId, arr);
-        // Capturar candidato a pós-interrupção: se novo orador começou sobre o último orador
+        
+        // Capturar candidato a pós-interrupção
         const lastSpeaker = this.lastSpeakerByMeeting.get(meetingId);
         if (lastSpeaker) {
           const someoneElseSpeaking = covers.some((c) => c.id !== lastSpeaker && c.coverage >= 0.2);
@@ -910,19 +1370,19 @@ export class FeedbackAggregatorService {
             const before = st?.ema.valence;
             const list = this.postInterruptionCandidatesByMeeting.get(meetingId) ?? [];
             list.push({ ts: now, interruptedId: lastSpeaker, valenceBefore: before });
-            // manter no máximo 10 registros
             while (list.length > 10) list.shift();
             this.postInterruptionCandidatesByMeeting.set(meetingId, list);
           }
         }
       }
     }
+    
     const arr = this.overlapHistoryByMeeting.get(meetingId) ?? [];
-    if (arr.length >= 5) {
+    if (arr.length >= t.minCount) {
       const type = 'interrupcoes_frequentes';
-      if (this.inCooldownMeeting(meetingId, type, now)) return;
-      this.setCooldownMeeting(meetingId, type, now, 30000);
-      // identify top two speakers in long window to reference
+      if (this.inCooldownMeeting(meetingId, type, now)) return null;
+      this.setCooldownMeeting(meetingId, type, now, THRESHOLDS.cooldowns.longTerm.interruptions);
+      
       const longCovers = covers
         .map((c) => {
           const st = participants.find(([pid]) => pid === c.id)?.[1];
@@ -937,273 +1397,27 @@ export class FeedbackAggregatorService {
         .map((x) => this.index.getParticipantName(meetingId, x.id) ?? x.id)
         .filter(Boolean);
       const who = names.length > 0 ? ` (${names.join(' , ')})` : '';
-      const payload: FeedbackEventPayload = {
+      
+      return {
         id: this.makeId(),
         type,
         severity: 'warning',
         ts: now,
         meetingId,
         participantId: 'group',
-        window: { start: now - 60000, end: now },
+        window: { start: now - t.windowMs, end: now },
         message: `Interrupções frequentes nos últimos 60s${who}. Combine turnos de fala.`,
         tips: ['Use levantar a mão', 'Defina ordem de fala'],
         metadata: {},
       };
-      this.delivery.publishToHosts(meetingId, payload);
-      // reset history after firing to avoid immediate re-triggers
-      this.overlapHistoryByMeeting.set(meetingId, []);
     }
+    return null;
   }
 
-  private evaluatePolarizacaoEmocional(meetingId: string, now: number): void {
-    const participants = this.participantsForMeeting(meetingId);
-    if (participants.length < 3) return;
-    const negVals: number[] = [];
-    const posVals: number[] = [];
-    for (const [pid, st] of participants) {
-      if (this.index.getParticipantRole(meetingId, pid) === 'host') continue;
-      const w = this.window(st, now, this.longWindowMs);
-      if (w.samplesCount === 0) continue;
-      const coverage = w.speechCount / w.samplesCount;
-      if (coverage < 0.3) continue;
-      const v = st.ema.valence;
-      if (typeof v !== 'number') continue;
-      if (v <= -0.2) negVals.push(v);
-      if (v >= 0.2) posVals.push(v);
-    }
-    if (negVals.length === 0 || posVals.length === 0) return;
-    const mean = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
-    const negMean = mean(negVals);
-    const posMean = mean(posVals);
-    if (posMean - negMean >= 0.5) {
-      const type = 'polarizacao_emocional';
-      if (this.inCooldownMeeting(meetingId, type, now)) return;
-      this.setCooldownMeeting(meetingId, type, now, 45000);
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity: 'warning',
-        ts: now,
-        meetingId,
-        participantId: 'group',
-        window: { start: now - this.longWindowMs, end: now },
-        message: `Polarização emocional no grupo (opiniões muito divergentes).`,
-        tips: ['Reconheça pontos de ambos os lados', 'Estabeleça objetivos comuns antes de decidir'],
-        metadata: {
-          valenceEMA: Number(((posMean + negMean) / 2).toFixed(3)),
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
+  // ===================================================================
+  // HELPERS
+  // ===================================================================
 
-  private updateSpeakerTracking(meetingId: string, now: number): void {
-    const participants = this.participantsForMeeting(meetingId);
-    if (participants.length === 0) return;
-    let topId: string | undefined;
-    let topCov = 0;
-    let secondCov = 0;
-    for (const [pid, st] of participants) {
-      const w = this.window(st, now, this.shortWindowMs);
-      if (w.samplesCount === 0) continue;
-      const cov = w.speechCount / w.samplesCount;
-      if (cov > topCov) {
-        secondCov = topCov;
-        topCov = cov;
-        topId = pid;
-      } else if (cov > secondCov) {
-        secondCov = cov;
-      }
-    }
-    if (topId && topCov >= 0.5 && secondCov < 0.2) {
-      this.lastSpeakerByMeeting.set(meetingId, topId);
-    }
-  }
-
-  private evaluateEfeitoPosInterrupcao(meetingId: string, now: number): void {
-    const list = this.postInterruptionCandidatesByMeeting.get(meetingId);
-    if (!list || list.length === 0) return;
-    const remaining: Array<{ ts: number; interruptedId: string; valenceBefore?: number }> = [];
-    for (const rec of list) {
-      const age = now - rec.ts;
-      if (age < 6000) {
-        // wait more time to observe effect
-        remaining.push(rec);
-        continue;
-      }
-      if (age > 30000) {
-        // expired
-        continue;
-      }
-      const st = this.byKey.get(this.key(meetingId, rec.interruptedId));
-      if (!st || typeof st.ema.valence !== 'number' || typeof rec.valenceBefore !== 'number') {
-        remaining.push(rec);
-        continue;
-      }
-      const delta = st.ema.valence - rec.valenceBefore;
-      const w = this.window(st, now, this.longWindowMs);
-      const coverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
-      if (delta <= -0.2 && coverage >= 0.2) {
-        const type = 'efeito_pos_interrupcao';
-        if (!this.inCooldown(st, type, now)) {
-          this.setCooldown(st, type, now, 25000);
-          const name = this.index.getParticipantName(meetingId, rec.interruptedId) ?? rec.interruptedId;
-          const payload: FeedbackEventPayload = {
-            id: this.makeId(),
-            type,
-            severity: 'warning',
-            ts: now,
-            meetingId,
-            participantId: rec.interruptedId,
-            window: { start: rec.ts, end: now },
-            message: `${name}: queda de ânimo após interrupção.`,
-            tips: ['Convide a concluir a ideia interrompida', 'Garanta espaço de fala'],
-            metadata: {
-              valenceEMA: st.ema.valence,
-            },
-          };
-          this.delivery.publishToHosts(meetingId, payload);
-        }
-        // do not keep this record further after evaluation
-      } else {
-        remaining.push(rec);
-      }
-    }
-    this.postInterruptionCandidatesByMeeting.set(meetingId, remaining);
-  }
-
-  private evaluateRitmoAceleradoPausado(
-    meetingId: string,
-    participantId: string,
-    state: ParticipantState,
-    now: number,
-  ): void {
-    const start = now - this.longWindowMs;
-    const samples = state.samples.filter((s) => s.ts >= start);
-    if (samples.length < 6) return;
-    // compute transitions and segment durations
-    let switches = 0;
-    let speechSegments = 0;
-    let silenceSegments = 0;
-    let longestSilence = 0;
-    let currentIsSpeech: boolean | undefined = undefined;
-    let currentStart = start;
-    let lastTs = start;
-    for (let i = 0; i < samples.length; i++) {
-      const s = samples[i];
-      const segDur = (s.ts - lastTs) / 1000;
-      if (typeof currentIsSpeech === 'boolean') {
-        if (currentIsSpeech) {
-          // speech segment
-        } else {
-          // silence segment
-          if (segDur > longestSilence) longestSilence = segDur;
-        }
-      }
-      if (typeof currentIsSpeech !== 'boolean') {
-        currentIsSpeech = s.speech;
-        currentStart = s.ts;
-        lastTs = s.ts;
-        continue;
-      }
-      if (s.speech !== currentIsSpeech) {
-        switches++;
-        // finalize segment
-        const dur = (s.ts - currentStart) / 1000;
-        if (currentIsSpeech) speechSegments++;
-        else {
-          silenceSegments++;
-          if (dur > longestSilence) longestSilence = dur;
-        }
-        currentIsSpeech = s.speech;
-        currentStart = s.ts;
-      }
-      lastTs = s.ts;
-    }
-    // finalize last segment until now
-    const tailDur = (now - currentStart) / 1000;
-    if (currentIsSpeech) speechSegments++;
-    else {
-      silenceSegments++;
-      if (tailDur > longestSilence) longestSilence = tailDur;
-    }
-    const windowSec = this.longWindowMs / 1000;
-    const switchesPerSec = switches / windowSec;
-    const w = this.window(state, now, this.longWindowMs);
-    const speechCoverage = w.samplesCount > 0 ? w.speechCount / w.samplesCount : 0;
-
-    // Gate: Only evaluate if participant has spoken before (avoid false positives from silent participants)
-    const hasSpokenBefore = state.samples.some(s => s.speech);
-    if (!hasSpokenBefore) return; // Don't alert on participants who never spoke
-
-    // Mutex: only evaluate ONE of these (prioritize acelerado if both conditions met)
-    const isAccelerated = switchesPerSec >= 1.0 && speechSegments >= 6;
-    // More strict: require BOTH long silence AND very low coverage (not just one)
-    const isPaused = longestSilence >= 5.0 && speechCoverage < 0.10; // Increased from 3.0s and 0.15
-
-    if (isAccelerated && isPaused) {
-      // Conflito detectado: ignorar ambos
-      return;
-    }
-
-    // ritmo acelerado
-    if (isAccelerated) {
-      const type = 'ritmo_acelerado';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      this.setCooldown(state, type, now, 20000);
-      const severity: 'info' | 'warning' = switchesPerSec >= 1.5 ? 'warning' : 'info';
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity,
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start, end: now },
-        message:
-          severity === 'warning'
-            ? `${name}: ritmo acelerado; desacelere para melhor entendimento.`
-            : `${name}: ritmo rápido; considere pausas curtas.`,
-        tips: ['Faça pausas para respiração', 'Enuncie com clareza'],
-        metadata: {
-          speechCoverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-      return;
-    }
-
-    // ritmo pausado
-    if (isPaused) {
-      const type = 'ritmo_pausado';
-      if (this.inCooldown(state, type, now) || this.inGlobalCooldown(state, now)) return;
-      // Increased cooldown from 20s to 60s to reduce spam
-      this.setCooldown(state, type, now, 60000);
-      const severity: 'info' | 'warning' = longestSilence >= 7.0 ? 'warning' : 'info'; // Increased threshold
-      const name = this.index.getParticipantName(meetingId, participantId) ?? participantId;
-      const payload: FeedbackEventPayload = {
-        id: this.makeId(),
-        type,
-        severity,
-        ts: now,
-        meetingId,
-        participantId,
-        window: { start, end: now },
-        message:
-          severity === 'warning'
-            ? `${name}: pausas muito longas (≥7s); tente manter um ritmo mais constante.`
-            : `${name}: ritmo lento; considere reduzir pausas longas.`,
-        tips: ['Reduza pausas longas', 'Mantenha frases mais curtas'],
-        metadata: {
-          speechCoverage,
-        },
-      };
-      this.delivery.publishToHosts(meetingId, payload);
-    }
-  }
-
-  // Helpers
   private window(
     state: ParticipantState,
     now: number,
@@ -1259,7 +1473,6 @@ export class FeedbackAggregatorService {
       state.ema.rms =
         typeof state.ema.rms === 'number' ? a * s.rmsDbfs + (1 - a) * state.ema.rms : s.rmsDbfs;
     }
-    // Update EMAs for specific emotions
     if (s.emotions) {
       for (const [name, score] of Object.entries(s.emotions)) {
         const key = name.toLowerCase();
@@ -1267,6 +1480,29 @@ export class FeedbackAggregatorService {
         const next = typeof prev === 'number' ? a * score + (1 - a) * prev : score;
         state.ema.emotions.set(key, next);
       }
+    }
+  }
+
+  private updateSpeakerTracking(meetingId: string, now: number): void {
+    const participants = this.participantsForMeeting(meetingId);
+    if (participants.length === 0) return;
+    let topId: string | undefined;
+    let topCov = 0;
+    let secondCov = 0;
+    for (const [pid, st] of participants) {
+      const w = this.window(st, now, this.shortWindowMs);
+      if (w.samplesCount === 0) continue;
+      const cov = w.speechCount / w.samplesCount;
+      if (cov > topCov) {
+        secondCov = topCov;
+        topCov = cov;
+        topId = pid;
+      } else if (cov > secondCov) {
+        secondCov = cov;
+      }
+    }
+    if (topId && topCov >= 0.5 && secondCov < 0.2) {
+      this.lastSpeakerByMeeting.set(meetingId, topId);
     }
   }
 
