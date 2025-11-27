@@ -3,6 +3,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { FeedbackDeliveryService } from './feedback.delivery.service';
 import { FeedbackEventPayload, FeedbackIngestionEvent } from './feedback.types';
 import { ParticipantIndexService } from '../livekit/participant-index.service';
+import { runA2E2Pipeline } from './a2e2/pipeline/run-a2e2-pipeline';
 
 type Sample = {
   ts: number;
@@ -262,44 +263,71 @@ export class FeedbackAggregatorService {
     // ===================================================================
     // ARQUITETURA EMOCIONAL 2.0 (A2E2) - Pipeline Hierárquico
     // ===================================================================
+    // IMPORTANTE: A aplicação usa a pipeline modular A2E2, não as heurísticas antigas.
+    // A pipeline está em: ./a2e2/pipeline/run-a2e2-pipeline.ts
+    // 
     // Prioridade absoluta: Camada 1 > Camada 2 > Camada 3 > Camada 4
     // Cada camada só executa se as anteriores não retornaram feedback
     
     // Atualizar tracking de oradores (necessário para camadas 2 e 4)
     this.updateSpeakerTracking(evt.meetingId, evt.ts);
     
-    // CAMADA 1: Emoções Primárias (Alta Confiança)
-    const primaryResult = this.detectPrimaryEmotions(evt.meetingId, participantId, state, evt.ts);
-    if (primaryResult) {
-      this.delivery.publishToHosts(evt.meetingId, primaryResult);
-      return; // Prioridade absoluta: não executar camadas inferiores
-    }
+    // Criar contexto para a pipeline A2E2
+    const ctx = {
+      meetingId: evt.meetingId,
+      participantId,
+      now: evt.ts,
+      getParticipantName: (mid: string, pid: string) => this.index.getParticipantName(mid, pid),
+      getParticipantRole: (mid: string, pid: string) => this.index.getParticipantRole(mid, pid),
+      inCooldown: (st: ParticipantState, type: string, n: number) => this.inCooldown(st, type, n),
+      inGlobalCooldown: (st: ParticipantState, n: number) => this.inGlobalCooldown(st, n),
+      setCooldown: (st: ParticipantState, type: string, n: number, ms: number) =>
+        this.setCooldown(st, type, n, ms),
+      inCooldownMeeting: (mid: string, type: string, n: number) =>
+        this.inCooldownMeeting(mid, type, n),
+      setCooldownMeeting: (mid: string, type: string, n: number, ms: number) =>
+        this.setCooldownMeeting(mid, type, n, ms),
+      makeId: () => this.makeId(),
+      window: (st: ParticipantState, n: number, ms: number) => this.window(st, n, ms),
+      getParticipantsForMeeting: (mid: string) => this.participantsForMeeting(mid),
+      getParticipantState: (mid: string, pid: string) => {
+        const k = this.key(mid, pid);
+        return this.byKey.get(k);
+      },
+      getPostInterruptionCandidates: (mid: string) =>
+        this.postInterruptionCandidatesByMeeting.get(mid),
+      updatePostInterruptionCandidates: (mid: string, candidates: Array<{ ts: number; interruptedId: string; valenceBefore?: number }>) => {
+        this.postInterruptionCandidatesByMeeting.set(mid, candidates);
+      },
+      getOverlapHistory: (mid: string) => this.overlapHistoryByMeeting.get(mid),
+      updateOverlapHistory: (mid: string, timestamps: number[]) => {
+        this.overlapHistoryByMeeting.set(mid, timestamps);
+      },
+      getLastOverlapSampleAt: (mid: string) => this.lastOverlapSampleAtByMeeting.get(mid),
+      setLastOverlapSampleAt: (mid: string, timestamp: number) => {
+        this.lastOverlapSampleAtByMeeting.set(mid, timestamp);
+      },
+    };
 
-    // CAMADA 2: Meta-Estados Emocionais (Combinações)
-    const metaResult = this.detectMetaStates(evt.meetingId, participantId, state, evt.ts);
-    if (metaResult) {
-      this.delivery.publishToHosts(evt.meetingId, metaResult);
-      return; // Não executar camadas 3 e 4
-    }
-
-    // CAMADA 3: Sinais Prosódicos (Arousal, Valence, Energia)
-    const prosodicResult = this.detectProsodicSignals(evt.meetingId, participantId, state, evt.ts);
-    if (prosodicResult) {
-      this.delivery.publishToHosts(evt.meetingId, prosodicResult);
-      return; // Não executar camada 4
-    }
-
-    // CAMADA 4: Estados de Longo Prazo (Comportamentais)
-    const longTermResult = this.detectLongTermSignals(evt.meetingId, participantId, state, evt.ts);
-    if (longTermResult) {
-      this.delivery.publishToHosts(evt.meetingId, longTermResult);
+    // Executar pipeline A2E2
+    const feedback = runA2E2Pipeline(state, ctx);
+    if (feedback) {
+      this.delivery.publishToHosts(evt.meetingId, feedback);
     }
   }
 
   // ===================================================================
-  // CAMADA 1: EMOÇÕES PRIMÁRIAS (Alta Confiança)
+  // HEURÍSTICAS ANTIGAS - SUBSTITUÍDAS PELA PIPELINE A2E2
+  // ===================================================================
+  // As funções abaixo foram substituídas pela pipeline modular A2E2.
+  // Mantidas para referência e possíveis comparações, mas não são mais chamadas.
+  // A nova pipeline está em: ./a2e2/pipeline/run-a2e2-pipeline.ts
+
+  // ===================================================================
+  // CAMADA 1: EMOÇÕES PRIMÁRIAS (Alta Confiança) - DEPRECATED
   // ===================================================================
   /**
+   * @deprecated Substituído pela pipeline A2E2 em ./a2e2/primary/
    * Detecta emoções primárias diretamente fornecidas pela Hume API.
    * Esta é a camada de maior prioridade - sempre tem precedência sobre outras.
    */
@@ -1516,7 +1544,7 @@ export class FeedbackAggregatorService {
     state.lastFeedbackAt = now;
   }
 
-  private inGlobalCooldown(state: ParticipantState, now: number, minGapMs = 5000): boolean {
+  private inGlobalCooldown(state: ParticipantState, now: number, minGapMs = 2000): boolean {
     return typeof state.lastFeedbackAt === 'number' && now - state.lastFeedbackAt < minGapMs;
   }
 
