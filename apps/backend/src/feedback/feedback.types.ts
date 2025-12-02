@@ -59,7 +59,11 @@ export interface FeedbackEventPayload {
     | 'ritmo_pausado'
     | 'hostilidade'
     | 'tedio'
-    | 'confusao';
+    | 'confusao'
+    | 'serenidade'
+    | 'conexao'
+    | 'tristeza'
+    | 'estado_mental';
   severity: FeedbackSeverity;
   ts: number;
   meetingId: string;

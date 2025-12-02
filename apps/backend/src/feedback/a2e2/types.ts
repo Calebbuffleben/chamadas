@@ -70,5 +70,9 @@ export type DetectionContext = {
   updateOverlapHistory?: (meetingId: string, timestamps: number[]) => void;
   getLastOverlapSampleAt?: (meetingId: string) => number | undefined;
   setLastOverlapSampleAt?: (meetingId: string, timestamp: number) => void;
+  // FASE 10.3.1: Métodos para histórico de emoções e contexto
+  getRecentEmotions?: (state: ParticipantState, windowMs: number, now: number) => Array<{ type: string; ts: number }>;
+  getEmotionTrend?: (state: ParticipantState, emotion: string, windowMs: number, now: number) => 'increasing' | 'decreasing' | 'stable';
+  getTensionLevel?: (state: ParticipantState) => 'high' | 'moderate' | 'low';
 };
 

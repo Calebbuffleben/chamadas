@@ -23,13 +23,13 @@ export const A2E2_THRESHOLDS = {
      * Threshold principal para considerar uma emoção como presente.
      * Emoções abaixo deste valor são ignoradas.
      */
-    main: 0.05,
+    main: 0.01,
 
     /**
      * Threshold para considerar uma emoção como dominante.
      * Uma emoção é dominante quando seu score é muito maior que outras.
      */
-    dominant: 0.15,
+    dominant: 0.10,
 
     /**
      * Crescimento rápido do EMA (Exponential Moving Average).
@@ -38,16 +38,32 @@ export const A2E2_THRESHOLDS = {
     rapidGrowth: 0.02,
 
     /**
-     * Hostilidade: Detecta anger, disgust e distress.
-     * Qualquer uma dessas emoções acima do threshold indica hostilidade.
+     * Hostilidade: Detecta múltiplas emoções relacionadas a hostilidade e ameaça.
      * 
-     * ETAPA 3: Thresholds ajustados de 0.12 para 0.07 (+40% vs original 0.05).
-     * Aumento moderado que mantém proteção contra ruído mas permite detecção de emoções moderadas.
+     * FASE 2: Expandido para incluir 6 novas emoções organizadas em subcategorias:
+     * - Hostilidade Ativa: anger, disgust, distress, rage, contempt
+     * - Medo/Ameaça: fear, horror, terror, anxiety
+     * 
+     * Thresholds por subcategoria:
+     * - Hostilidade ativa: 0.07-0.10 (thresholds variados por intensidade)
+     * - Medo/Ameaça: 0.08-0.12 (mais conservador, requer mais confiança)
+     * 
+     * Nota: Os valores anteriores estavam em 1.0 (efetivamente desabilitados).
+     * FASE 2: Valores ajustados para thresholds funcionais baseados em análise de padrões.
      */
     hostility: {
+      // Hostilidade Ativa - emoções de raiva e desprezo
       anger: 0.07,
       disgust: 0.07,
       distress: 0.07,
+      rage: 0.08, // Rage é mais intenso, threshold ligeiramente maior
+      contempt: 0.07,
+      
+      // Medo/Ameaça - emoções de medo e ansiedade
+      fear: 0.10, // Threshold mais alto, requer mais confiança
+      horror: 0.12, // Horror é extremo, threshold mais alto
+      terror: 0.12, // Terror é extremo, threshold mais alto
+      anxiety: 0.08, // Anxiety é mais moderado que fear
     },
 
     /**
@@ -59,7 +75,7 @@ export const A2E2_THRESHOLDS = {
      * Aumento moderado que mantém proteção contra ruído mas permite detecção de emoções moderadas.
      */
     frustration: {
-      frustration: 0.07,
+      frustration: 0.15,
       // Também pode ser detectada via meta-estados (frustrationTrend)
     },
 
@@ -73,9 +89,9 @@ export const A2E2_THRESHOLDS = {
      * Aumentos moderados que mantêm proteção contra ruído mas permitem detecção de emoções moderadas.
      */
     boredom: {
-      boredom: 0.07,
-      tiredness: 0.10,
-      interestLow: 0.05, // Interest deve estar abaixo disso
+      boredom: 0.15,
+      tiredness: 0.20,
+      interestLow: 0.15, // Interest deve estar abaixo disso
     },
 
     /**
@@ -85,21 +101,146 @@ export const A2E2_THRESHOLDS = {
      * Aumento moderado que mantém proteção contra ruído mas permite detecção de emoções moderadas.
      */
     confusion: {
-      confusion: 0.07,
-      doubt: 0.07,
+      confusion: 1,
+      doubt: 0.15,
     },
 
     /**
-     * Engajamento Positivo: Detecta interest, joy e determination.
-     * Indica participante engajado e positivo.
+     * Engajamento Positivo: Detecta múltiplas emoções de alta energia positiva.
      * 
-     * ETAPA 3: Thresholds ajustados de 0.08 para 0.06 (+20% vs original 0.05).
-     * Aumento pequeno (engajamento é positivo, então threshold mais baixo é apropriado).
+     * FASE 3: Expandido para incluir 8 novas emoções organizadas em subcategorias:
+     * - Engajamento Moderado: interest, joy, determination, enthusiasm, excitement
+     * - Engajamento Intenso: ecstasy, triumph, awe, admiration
+     * - Engajamento Lúdico: amusement, entrancement
+     * 
+     * Thresholds por subcategoria:
+     * - Moderado: 0.06 (mantém atual, mais sensível)
+     * - Intenso: 0.08 (mais alto, requer mais confiança)
+     * - Lúdico: 0.07 (intermediário)
      */
     engagement: {
+      // Engajamento Moderado
       interest: 0.06,
       joy: 0.06,
       determination: 0.06,
+      enthusiasm: 0.06,
+      excitement: 0.06,
+      
+      // Engajamento Intenso
+      ecstasy: 0.08,
+      triumph: 0.08,
+      awe: 0.08,
+      admiration: 0.08,
+      
+      // Engajamento Lúdico
+      amusement: 0.07,
+      entrancement: 0.07,
+    },
+
+    /**
+     * Serenidade: Detecta calmness, contentment, relief e satisfaction.
+     * Indica estado de tranquilidade e satisfação leve.
+     * 
+     * FASE 1: Thresholds iniciais definidos de forma conservadora.
+     * Serenidade requer threshold mais alto que engajamento (0.08) pois é menos urgente.
+     */
+    serenity: {
+      calmness: 0.08,
+      contentment: 0.08,
+      relief: 0.08,
+      satisfaction: 0.08,
+    },
+
+    /**
+     * Conexão Social: Detecta affection, emphatic pain, love e sympathy.
+     * Indica conexão emocional e empatia entre participantes.
+     * 
+     * FASE 1: Thresholds iniciais definidos de forma conservadora.
+     * Conexão requer threshold moderado (0.07) pois é positivo mas não urgente.
+     */
+    connection: {
+      affection: 0.07,
+      emphaticPain: 0.07,
+      love: 0.07,
+      sympathy: 0.07,
+    },
+
+    /**
+     * Tristeza: Detecta múltiplas emoções relacionadas a estados emocionais negativos.
+     * Indica estados emocionais negativos relacionados a perda, julgamento ou autoavaliação.
+     * 
+     * FASE 6: Expandido com 6 novas emoções (grief, loneliness, melancholy, regret, sorrow, despair).
+     * Tristeza tem thresholds variados por subcategoria:
+     * - Tristeza direta: 0.10 (sadness, disappointment, sorrow)
+     * - Autoavaliação negativa: 0.12 (guilt, shame, embarrassment, regret)
+     * - Julgamento: 0.08 (disapproval)
+     * - Luto/Perda profunda: 0.11 (grief, despair)
+     * - Isolamento: 0.10 (loneliness, melancholy)
+     */
+    sadness: {
+      sadness: 0.10,
+      disappointment: 0.10,
+      guilt: 0.12,
+      shame: 0.12,
+      embarrassment: 0.12,
+      disapproval: 0.08,
+      // FASE 6: Novas emoções
+      grief: 0.11,
+      loneliness: 0.10,
+      melancholy: 0.10,
+      regret: 0.12,
+      sorrow: 0.10,
+      despair: 0.11,
+    },
+
+    /**
+     * Estado Mental: Detecta múltiplos estados contextuais e neutros.
+     * Inclui: awkwardness, concentration, contemplation, desire, nostalgia, pain, pride,
+     * realization, surprise (positiva/negativa), envy, neutral.
+     * 
+     * FASE 7: Expandido com 11 novas emoções (curiosity, anticipation, hope, relief, satisfaction,
+     * calmness, contentment, interest, confusion, doubt, boredom).
+     * Estados mentais têm thresholds variados por subcategoria:
+     * - Foco: 0.10 (concentration, contemplation)
+     * - Desconforto social: 0.08 (awkwardness, envy)
+     * - Sofrimento: 0.12 (pain)
+     * - Autoafirmação: 0.09 (pride)
+     * - Insight: 0.07 (realization)
+     * - Memória afetiva: 0.10 (nostalgia)
+     * - Motivação: 0.10 (desire)
+     * - Quebra de expectativa: 0.10 (surprise positiva/negativa)
+     * - Estado basal: 0.15 (neutral - threshold alto pois é estado padrão)
+     * - Curiosidade: 0.09 (curiosity, anticipation)
+     * - Esperança: 0.10 (hope)
+     * - Tranquilidade: 0.08 (relief, satisfaction, calmness, contentment)
+     * - Interesse: 0.10 (interest)
+     * - Incerteza: 0.08 (confusion, doubt)
+     * - Baixa energia: 0.10 (boredom)
+     */
+    mentalState: {
+      concentration: 0.10,
+      contemplation: 0.10,
+      awkwardness: 0.08,
+      envy: 0.08,
+      pain: 0.12,
+      pride: 0.09,
+      realization: 0.07,
+      nostalgia: 0.10,
+      desire: 0.10,
+      surprise: 0.10,
+      neutral: 0.15,
+      // FASE 7: Novas emoções
+      curiosity: 0.09,
+      anticipation: 0.09,
+      hope: 0.10,
+      relief: 0.08,
+      satisfaction: 0.08,
+      calmness: 0.08,
+      contentment: 0.08,
+      interest: 0.10,
+      confusion: 0.08,
+      doubt: 0.08,
+      boredom: 0.10,
     },
   },
 
@@ -212,13 +353,13 @@ export const A2E2_THRESHOLDS = {
        * Volume baixo (warning).
        * Abaixo de -28 dBFS é considerado baixo.
        */
-      low: -28,
+      low: -38,
 
       /**
        * Volume crítico (critical).
        * Abaixo de -34 dBFS é quase inaudível.
        */
-      lowCritical: -34,
+      lowCritical: -44,
 
       /**
        * Volume alto (warning).
@@ -582,6 +723,17 @@ export const A2E2_THRESHOLDS = {
        */
       confusion: 25_000,
       positiveEngagement: 60_000, // Mais longo para evitar spam de elogios
+      /**
+       * FASE 1: Cooldowns para novos detectores.
+       * Serenidade: 90s (mais longo, não é urgente)
+       * Conexão: 75s (moderado, positivo mas não crítico)
+       * Tristeza: 40s (moderado-alto, requer atenção mas não é urgente como hostilidade)
+       * Estado Mental: 60s (moderado, estados contextuais variados)
+       */
+      serenity: 90_000,
+      connection: 75_000,
+      sadness: 40_000,
+      mentalState: 60_000,
     },
 
     /**

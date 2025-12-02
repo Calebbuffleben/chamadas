@@ -43,7 +43,7 @@ describe('detectFrustration', () => {
   describe('Cenário Positivo - Detecta frustração', () => {
     it('deve detectar frustração quando frustration está acima do threshold', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.12], // Acima de 0.10
+        ['frustration', 0.16], // Acima de 0.15 (threshold atual)
         ['anger', 0.02],
       ]);
       const state = createMockState(emotions);
@@ -59,7 +59,7 @@ describe('detectFrustration', () => {
 
     it('deve detectar frustração quando frustration está bem acima do threshold', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.15], // Bem acima
+        ['frustration', 0.20], // Bem acima de 0.15
       ]);
       const state = createMockState(emotions);
       const ctx = createMockCtx();
@@ -72,7 +72,7 @@ describe('detectFrustration', () => {
 
     it('deve detectar frustração mesmo com outras emoções presentes', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.12],
+        ['frustration', 0.16], // Acima de 0.15
         ['confusion', 0.03],
         ['interest', 0.02],
       ]);
@@ -89,7 +89,7 @@ describe('detectFrustration', () => {
   describe('Cenário Negativo - Não detecta frustração', () => {
     it('não deve detectar quando frustration está abaixo do threshold', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.08], // Abaixo de 0.10
+        ['frustration', 0.10], // Abaixo de 0.15
       ]);
       const state = createMockState(emotions);
       const ctx = createMockCtx();
@@ -114,7 +114,7 @@ describe('detectFrustration', () => {
 
     it('não deve detectar quando está em cooldown', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.12],
+        ['frustration', 0.16],
       ]);
       const state = createMockState(emotions);
       const ctx = createMockCtx();
@@ -127,22 +127,22 @@ describe('detectFrustration', () => {
   });
 
   describe('Cenário Borderline - Casos limite', () => {
-    it('não deve detectar quando frustration está exatamente no threshold (0.10)', () => {
+    it('não deve detectar quando frustration está exatamente no threshold (0.15)', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.10], // Exatamente no threshold
+        ['frustration', 0.15], // Exatamente no threshold
       ]);
       const state = createMockState(emotions);
       const ctx = createMockCtx();
 
       const result = detectFrustration(state, ctx);
 
-      // Threshold é > 0.10, então 0.10 não deve detectar
+      // Threshold é > 0.15, então 0.15 não deve detectar (usa <=)
       expect(result).toBeNull();
     });
 
-    it('deve detectar quando frustration está ligeiramente acima do threshold (0.1001)', () => {
+    it('deve detectar quando frustration está ligeiramente acima do threshold (0.1501)', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.1001], // Ligeiramente acima de 0.10
+        ['frustration', 0.1501], // Ligeiramente acima de 0.15
       ]);
       const state = createMockState(emotions);
       const ctx = createMockCtx();
@@ -155,7 +155,7 @@ describe('detectFrustration', () => {
 
     it('não deve detectar quando está em global cooldown', () => {
       const emotions = new Map<string, number>([
-        ['frustration', 0.12],
+        ['frustration', 0.16],
       ]);
       const state = createMockState(emotions);
       const ctx = createMockCtx();
