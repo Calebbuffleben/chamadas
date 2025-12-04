@@ -52,18 +52,22 @@ export const A2E2_THRESHOLDS = {
      * FASE 2: Valores ajustados para thresholds funcionais baseados em análise de padrões.
      */
     hostility: {
-      // Hostilidade Ativa - emoções de raiva e desprezo
-      anger: 0.07,
-      disgust: 0.07,
-      distress: 0.07,
-      rage: 0.08, // Rage é mais intenso, threshold ligeiramente maior
-      contempt: 0.07,
+      // CORREÇÃO: Hostilidade Ativa - thresholds aumentados para reduzir falsos positivos
+      // Aumentados de 0.07 para 0.09 (+28%) para reduzir detecções de emoções leves
+      anger: 0.20,      // Aumentado de 0.07
+      disgust: 0.12,    // Aumentado de 0.07
+      distress: 0.09,   // Aumentado de 0.07
+      rage: 0.10,       // Aumentado de 0.08 (+25%)
+      contempt: 0.09,   // Aumentado de 0.07
       
       // Medo/Ameaça - emoções de medo e ansiedade
-      fear: 0.10, // Threshold mais alto, requer mais confiança
-      horror: 0.12, // Horror é extremo, threshold mais alto
-      terror: 0.12, // Terror é extremo, threshold mais alto
-      anxiety: 0.08, // Anxiety é mais moderado que fear
+      // CORREÇÃO: Thresholds aumentados para reduzir falsos positivos
+      fear: 0.15,       // Aumentado de 0.10 (+20%)
+      horror: 0.18,     // Aumentado de 0.12 (+25%)
+      terror: 0.18,     // Aumentado de 0.12 (+25%)
+      // CORREÇÃO: Anxiety aumentado de 0.08 para 0.12 para reduzir falsos positivos
+      // Ansiedade leve é comum em conversas normais e não representa hostilidade
+      anxiety: 0.12,    // Aumentado para reduzir falsos positivos de ansiedade leve
     },
 
     /**

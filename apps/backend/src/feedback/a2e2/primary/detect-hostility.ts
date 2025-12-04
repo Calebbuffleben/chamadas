@@ -95,19 +95,23 @@ export function detectHostility(
   // Verifica se qualquer emoção na subcategoria está acima do seu threshold específico
   const t = A2E2_THRESHOLDS.primary.hostility;
   
+  // CORREÇÃO: Threshold mínimo absoluto aumentado para prevenir falsos positivos
+  // Aumentado de 0.06 para 0.08 - thresholds muito baixos causam muitos falsos positivos
+  const MIN_HOSTILITY_THRESHOLD = 0.08; // 8% mínimo absoluto (aumentado de 6%)
+  
   // Aplica ajustes por tensão primeiro, depois por tendência temporal
   const tAdjusted = {
     // Hostilidade ativa: ajusta thresholds em alta tensão + tendência temporal
-    anger: getThresholdByTrend(getHostilityThreshold(t.anger, tensionLevel), getEmotionTrendValue('anger'), 'negative'),
-    disgust: getThresholdByTrend(getHostilityThreshold(t.disgust, tensionLevel), getEmotionTrendValue('disgust'), 'negative'),
-    distress: getThresholdByTrend(getHostilityThreshold(t.distress, tensionLevel), getEmotionTrendValue('distress'), 'negative'),
-    rage: getThresholdByTrend(getHostilityThreshold(t.rage, tensionLevel), getEmotionTrendValue('rage'), 'negative'),
-    contempt: getThresholdByTrend(getHostilityThreshold(t.contempt, tensionLevel), getEmotionTrendValue('contempt'), 'negative'),
+    anger: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getHostilityThreshold(t.anger, tensionLevel), getEmotionTrendValue('anger'), 'negative')),
+    disgust: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getHostilityThreshold(t.disgust, tensionLevel), getEmotionTrendValue('disgust'), 'negative')),
+    distress: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getHostilityThreshold(t.distress, tensionLevel), getEmotionTrendValue('distress'), 'negative')),
+    rage: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getHostilityThreshold(t.rage, tensionLevel), getEmotionTrendValue('rage'), 'negative')),
+    contempt: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getHostilityThreshold(t.contempt, tensionLevel), getEmotionTrendValue('contempt'), 'negative')),
     // Medo/Ameaça: ajusta thresholds em alta tensão (redução menor) + tendência temporal
-    fear: getThresholdByTrend(getThreatThreshold(t.fear, tensionLevel), getEmotionTrendValue('fear'), 'negative'),
-    horror: getThresholdByTrend(getThreatThreshold(t.horror, tensionLevel), getEmotionTrendValue('horror'), 'negative'),
-    terror: getThresholdByTrend(getThreatThreshold(t.terror, tensionLevel), getEmotionTrendValue('terror'), 'negative'),
-    anxiety: getThresholdByTrend(getThreatThreshold(t.anxiety, tensionLevel), getEmotionTrendValue('anxiety'), 'negative'),
+    fear: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getThreatThreshold(t.fear, tensionLevel), getEmotionTrendValue('fear'), 'negative')),
+    horror: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getThreatThreshold(t.horror, tensionLevel), getEmotionTrendValue('horror'), 'negative')),
+    terror: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getThreatThreshold(t.terror, tensionLevel), getEmotionTrendValue('terror'), 'negative')),
+    anxiety: Math.max(MIN_HOSTILITY_THRESHOLD, getThresholdByTrend(getThreatThreshold(t.anxiety, tensionLevel), getEmotionTrendValue('anxiety'), 'negative')),
   };
   
   const hasActiveHostility = 
@@ -145,10 +149,10 @@ export function detectHostility(
     // FASE 10.3.1: Validação por tendência consistente
     // Se hostilidade está aumentando consistentemente (3+ detecções consecutivas), reduz threshold adicional
     if (hasConsistentTrend(recentEmotions, 'hostilidade', 30_000, now)) {
-      // Aplica redução adicional de 10% para detecção precoce
+      // CORREÇÃO: Aplica redução adicional de 10% para detecção precoce, mas respeita mínimo absoluto
       Object.keys(tAdjusted).forEach((key) => {
         const k = key as keyof typeof tAdjusted;
-        tAdjusted[k] = tAdjusted[k] * 0.9;
+        tAdjusted[k] = Math.max(MIN_HOSTILITY_THRESHOLD, tAdjusted[k] * 0.9);
       });
     }
   }
@@ -156,21 +160,76 @@ export function detectHostility(
   // FASE 2: Validações contextuais por subcategoria
   // (arousal e valence já obtidos acima)
 
-  // Hostilidade ativa requer energia moderada (arousal >= 0.2)
-  if (hasActiveHostility && typeof arousal === 'number' && arousal < 0.2) {
-    return null; // Hostilidade ativa sem energia mínima é falso positivo
+  // CORREÇÃO: Hostilidade ativa requer energia moderada - aumentado de 0.2 para 0.25
+  // Aumentado para reduzir falsos positivos de emoções leves
+  if (hasActiveHostility && typeof arousal === 'number' && arousal < 0.25) {
+    return null; // Hostilidade ativa sem energia suficiente é falso positivo
   }
 
-  // Medo/Ameaça requer energia mínima menor (arousal >= 0.15)
-  // Medo pode ter menos energia que hostilidade ativa
-  if (hasThreat && typeof arousal === 'number' && arousal < 0.15) {
-    return null; // Medo sem energia mínima é falso positivo
+  // CORREÇÃO: Medo/Ameaça requer energia mínima maior para reduzir falsos positivos
+  // Aumentado de 0.15 para 0.25 - ansiedade leve não deve ser detectada como hostilidade
+  if (hasThreat && typeof arousal === 'number' && arousal < 0.25) {
+    return null; // Medo sem energia suficiente não é hostilidade real
   }
 
-  // Hostilidade ativa geralmente tem valence negativo
+  // CORREÇÃO: Hostilidade ativa geralmente tem valence negativo - validação mais restritiva
+  // Reduzido de 0.1 para 0.0 - hostilidade ativa não deve ter tom positivo
   // Mas não bloqueamos se for medo (medo pode ter valence variado)
-  if (hasActiveHostility && !hasThreat && typeof valence === 'number' && valence > 0.1) {
-    return null; // Hostilidade ativa com tom muito positivo é contraditório
+  if (hasActiveHostility && !hasThreat && typeof valence === 'number' && valence > 0.0) {
+    return null; // Hostilidade ativa com tom positivo é contraditório
+  }
+
+  // CORREÇÃO: Calcula emoções positivas uma vez para validações
+  const joy = state.ema.emotions.get('joy') ?? 0;
+  const interest = state.ema.emotions.get('interest') ?? 0;
+  const enthusiasm = state.ema.emotions.get('enthusiasm') ?? 0;
+  const excitement = state.ema.emotions.get('excitement') ?? 0;
+  const amusement = state.ema.emotions.get('amusement') ?? 0;
+  const positiveScore = Math.max(joy, interest, enthusiasm, excitement, amusement);
+
+  // CORREÇÃO: Validação de intensidade relativa geral - muito mais restritiva
+  // Reduzido de 50% para 40% - se emoções positivas são 40% ou mais da hostilidade, não é hostilidade real
+  // Aplicado antes das validações específicas para evitar cálculos duplicados
+  if (positiveScore > hostilityScore * 0.4) {
+    return null; // Emoções positivas dominam, não é hostilidade
+  }
+  
+  // CORREÇÃO ADICIONAL: Se emoções positivas são moderadas (>= 0.08), bloqueia hostilidade baixa/moderada
+  // Aumentado de 0.06 para 0.08 para ser menos restritivo e permitir mais detecções legítimas
+  if (positiveScore >= 0.08 && hostilityScore < 0.15) {
+    return null; // Emoções positivas moderadas bloqueiam hostilidade baixa/moderada
+  }
+
+  // CORREÇÃO: Validação de score mínimo absoluto para hostilidade - mais restritiva
+  // Aumentado de 0.10 para 0.12 - hostilidade muito baixa não deve gerar feedback
+  // Mas permite se há emoção dominante específica (será verificado depois)
+  if (hostilityScore < 0.12) {
+    // Requer arousal muito alto para hostilidade leve ser considerada real
+    if (typeof arousal === 'number' && arousal < 0.35) {
+      return null; // Hostilidade muito baixa sem arousal alto não é hostilidade real
+    }
+    // Requer valence muito negativo para hostilidade leve ser considerada real
+    if (typeof valence === 'number' && valence > -0.15) {
+      return null; // Hostilidade muito baixa sem tom negativo suficiente não é hostilidade real
+    }
+    // Se há emoções positivas moderadas, não é hostilidade
+    // Aumentado de 0.04 para 0.05 para ser menos restritivo
+    if (positiveScore > 0.05) {
+      return null; // Emoções positivas moderadas bloqueiam hostilidade muito baixa
+    }
+  }
+
+  // CORREÇÃO: Validação específica para anxiety - ansiedade leve não é hostilidade
+  // Se apenas anxiety está acima do threshold, requer validações mais estritas
+  if (hasThreat && !hasActiveHostility && anxiety > tAdjusted.anxiety) {
+    // Anxiety com valence positivo não é hostilidade (nervosismo positivo)
+    if (typeof valence === 'number' && valence > 0.0) {
+      return null; // Ansiedade positiva não é hostilidade
+    }
+    // Se há emoções positivas fortes, não é hostilidade (já calculado acima)
+    if (positiveScore > anxiety * 0.7) {
+      return null; // Emoções positivas dominam sobre ansiedade leve
+    }
   }
 
   // Verifica cooldowns
@@ -198,46 +257,131 @@ export function detectHostility(
   // Define cooldown
   ctx.setCooldown(state, type, now, A2E2_THRESHOLDS.cooldowns.primaryEmotion.hostility);
 
+  // CORREÇÃO CRÍTICA: Validação adicional muito mais restritiva
+  // A mensagem "a conversa esquentou" só deve aparecer quando há hostilidade CLARA e SIGNIFICATIVA
+  // Se hostilidade é baixa/moderada, requer validações muito mais estritas ou bloqueia completamente
+  
+  // Se não há hostilidade ativa clara, requer hostilidade muito mais alta
+  if (!hasActiveHostility) {
+    // Apenas medo/ameaça: requer score muito mais alto (0.15+) e validações estritas
+    if (hostilityScore < 0.15) {
+      return null; // Medo/ameaça leve não é hostilidade suficiente
+    }
+    // Requer arousal alto e valence negativo para medo/ameaça ser considerado hostilidade
+    if (typeof arousal === 'number' && arousal < 0.35) {
+      return null; // Medo/ameaça sem arousal alto não é hostilidade
+    }
+    if (typeof valence === 'number' && valence > -0.2) {
+      return null; // Medo/ameaça sem tom negativo suficiente não é hostilidade
+    }
+  } else {
+    // Há hostilidade ativa: requer score mínimo de 0.12 para mensagem padrão
+    if (hostilityScore < 0.12) {
+      return null; // Hostilidade ativa muito baixa não gera mensagem padrão
+    }
+  }
+  
+  // CORREÇÃO: Bloqueia mensagem padrão se não há emoção dominante clara E hostilidade é moderada
+  // Mensagem padrão só aparece se hostilidade é alta OU há emoção dominante específica
+  const hasClearDominantEmotion = 
+    (threatScore > activeHostilityScore && (
+      terror > tAdjusted.terror && terror === threatScore ||
+      horror > tAdjusted.horror && horror === threatScore ||
+      fear > tAdjusted.fear && fear === threatScore ||
+      anxiety > tAdjusted.anxiety && anxiety === threatScore
+    )) ||
+    (activeHostilityScore > threatScore && (
+      rage > tAdjusted.rage && rage === activeHostilityScore ||
+      contempt > tAdjusted.contempt && contempt === activeHostilityScore
+    ));
+  
+  // Se não há emoção dominante clara, requer hostilidade mais alta para mensagem padrão
+  if (!hasClearDominantEmotion && hostilityScore < 0.15) {
+    return null; // Hostilidade moderada sem emoção dominante não gera mensagem padrão
+  }
+
   // FASE 2: Gera feedback baseado na subcategoria dominante
   const name = ctx.getParticipantName(meetingId, participantId) ?? participantId;
   
+  // CORREÇÃO: Inicializa mensagem padrão e flag de emoção específica
   let message = `${name}: a conversa esquentou. Considere validar o ponto do outro antes de prosseguir.`;
   let tips: string[] = ['Respire fundo', 'Use frases como "Entendo seu ponto..."', 'Evite interrupções agora'];
-
+  let hasSpecificEmotion = false; // Flag para indicar se há emoção dominante específica
+  let useDefaultMessage = false; // Flag para indicar se deve usar mensagem padrão
+  
   // FASE 9: Mensagens específicas baseadas na emoção dominante (padronizado)
+  // ORDEM DE PRIORIDADE: Verifica emoções específicas PRIMEIRO, na ordem de intensidade
   // Padrão: emoção > threshold && emoção === score && emoção > outras na mesma categoria
+  
   if (threatScore > activeHostilityScore) {
-    // Medo/Ameaça é dominante
-    const isTerrorDominant = terror > tAdjusted.terror && terror === threatScore && terror > Math.max(fear, horror, anxiety);
-    const isHorrorDominant = horror > tAdjusted.horror && horror === threatScore && horror > Math.max(fear, terror, anxiety);
-    const isFearDominant = fear > tAdjusted.fear && fear === threatScore && fear > Math.max(horror, terror, anxiety);
-    const isAnxietyDominant = anxiety > tAdjusted.anxiety && anxiety === threatScore && anxiety > Math.max(fear, horror, terror);
+    // Medo/Ameaça é dominante - verifica em ordem de prioridade (mais intenso primeiro)
+    // Terror > Horror > Fear > Anxiety
+    const isTerrorDominant = terror > tAdjusted.terror && terror === threatScore && terror >= Math.max(fear, horror, anxiety);
+    const isHorrorDominant = !isTerrorDominant && horror > tAdjusted.horror && horror === threatScore && horror >= Math.max(fear, terror, anxiety);
+    const isFearDominant = !isTerrorDominant && !isHorrorDominant && fear > tAdjusted.fear && fear === threatScore && fear >= Math.max(horror, terror, anxiety);
+    const isAnxietyDominant = !isTerrorDominant && !isHorrorDominant && !isFearDominant && anxiety > tAdjusted.anxiety && anxiety === threatScore && anxiety >= Math.max(fear, horror, terror);
     
     if (isTerrorDominant) {
       message = `${name}: pânico extremo detectado. Priorize acalmar o ambiente.`;
       tips = ['Crie um espaço seguro', 'Valide o medo expresso', 'Reduza a pressão imediatamente'];
+      hasSpecificEmotion = true;
     } else if (isHorrorDominant) {
       message = `${name}: horror detectado. Ambiente precisa de acalmação urgente.`;
       tips = ['Crie um espaço seguro', 'Valide o sentimento', 'Considere fazer uma pausa'];
+      hasSpecificEmotion = true;
     } else if (isFearDominant) {
       message = `${name}: medo detectado. Considere criar um ambiente mais seguro.`;
       tips = ['Valide o medo expresso', 'Crie um espaço seguro', 'Reduza a pressão'];
+      hasSpecificEmotion = true;
     } else if (isAnxietyDominant) {
-      message = `${name}: ansiedade detectada. Considere reduzir a pressão.`;
-      tips = ['Valide a ansiedade', 'Reduza a pressão', 'Crie um ambiente mais acolhedor'];
+      // Ansiedade: mensagem diferenciada por intensidade
+      if (anxiety < 0.15) {
+        message = `${name}: parece haver alguma tensão ou ansiedade. Considere criar um ambiente mais acolhedor.`;
+        tips = ['Valide a ansiedade', 'Reduza a pressão', 'Crie um espaço seguro'];
+        severity = 'info';
+      } else {
+        message = `${name}: ansiedade detectada. Considere reduzir a pressão.`;
+        tips = ['Valide a ansiedade', 'Reduza a pressão', 'Crie um ambiente mais acolhedor'];
+      }
+      hasSpecificEmotion = true;
     }
-  } else {
-    // Hostilidade ativa é dominante
-    const isRageDominant = rage > t.rage && rage === activeHostilityScore && rage > Math.max(anger, disgust, distress, contempt);
-    const isContemptDominant = contempt > tAdjusted.contempt && contempt === activeHostilityScore && contempt > Math.max(anger, disgust, distress, rage);
+  } else if (activeHostilityScore > threatScore) {
+    // Hostilidade ativa é dominante - verifica em ordem de prioridade (mais intenso primeiro)
+    // Rage > Contempt > Anger/Disgust/Distress
+    const isRageDominant = rage > tAdjusted.rage && rage === activeHostilityScore && rage >= Math.max(anger, disgust, distress, contempt);
+    const isContemptDominant = !isRageDominant && contempt > tAdjusted.contempt && contempt === activeHostilityScore && contempt >= Math.max(anger, disgust, distress, rage);
     
     if (isRageDominant) {
       message = `${name}: raiva explosiva detectada. Priorize desescalar a situação.`;
       tips = ['Não reaja com raiva', 'Respire fundo', 'Considere fazer uma pausa'];
+      hasSpecificEmotion = true;
     } else if (isContemptDominant) {
       message = `${name}: desprezo detectado. Considere validar o ponto do outro.`;
       tips = ['Evite julgamentos', 'Valide diferentes perspectivas', 'Mantenha respeito'];
+      hasSpecificEmotion = true;
     }
+  }
+  
+  // Se não há emoção dominante específica, verifica se deve usar mensagem padrão
+  if (!hasSpecificEmotion) {
+    // CORREÇÃO CRÍTICA: Mensagem padrão "a conversa esquentou" só deve aparecer em casos muito específicos
+    // Requer hostilidade ativa alta (>= 0.15) OU medo/ameaça muito alto (>= 0.15) com validações estritas
+    if (hasActiveHostility && hostilityScore >= 0.15) {
+      useDefaultMessage = true;
+    } else if (hasThreat && !hasActiveHostility && hostilityScore >= 0.15) {
+      // Medo/ameaça muito alto pode usar mensagem padrão APENAS se passar validações muito estritas
+      // Requer arousal muito alto (>= 0.4) e valence muito negativo (<= -0.25)
+      if (typeof arousal === 'number' && arousal >= 0.4 && typeof valence === 'number' && valence <= -0.25) {
+        useDefaultMessage = true;
+      }
+    }
+  }
+  
+  // CORREÇÃO CRÍTICA: Só bloqueia se NÃO há emoção dominante específica E não passou nas validações para mensagem padrão
+  // Se há emoção dominante específica (terror, horror, fear, anxiety, rage, contempt), SEMPRE permite o feedback
+  // Isso previne que hostilidade moderada sem emoção específica gere feedback, mas permite emoções específicas
+  if (!hasSpecificEmotion && !useDefaultMessage) {
+    return null; // Sem emoção dominante específica E sem validação para mensagem padrão = não gera feedback
   }
 
   return {
