@@ -4,6 +4,8 @@ import { FeedbackDeliveryService } from './feedback.delivery.service';
 import { FeedbackEventPayload, FeedbackIngestionEvent } from './feedback.types';
 import { ParticipantIndexService } from '../livekit/participant-index.service';
 import { runA2E2Pipeline } from './a2e2/pipeline/run-a2e2-pipeline';
+import { TextAnalysisResult } from '../pipeline/text-analysis.service';
+import type { DetectionContext } from './a2e2/types';
 
 type Sample = {
   ts: number;
@@ -24,6 +26,17 @@ type ParticipantState = {
   };
   cooldownUntilByType: Map<string, number>;
   lastFeedbackAt?: number; // Global cooldown to prevent spam
+  // NOVO: Dados de análise de texto
+  textAnalysis?: {
+    sentiment: {
+      positive: number;
+      negative: number;
+      neutral: number;
+    };
+    keywords: string[];
+    hasQuestion: boolean;
+    lastUpdate?: number;
+  };
 };
 
 /**
@@ -273,10 +286,67 @@ export class FeedbackAggregatorService {
     this.updateSpeakerTracking(evt.meetingId, evt.ts);
     
     // Criar contexto para a pipeline A2E2
-    const ctx = {
-      meetingId: evt.meetingId,
+    const ctx = this.createDetectionContext(evt.meetingId, participantId, evt.ts);
+
+    // Executar pipeline A2E2
+    const feedback = runA2E2Pipeline(state, ctx);
+    if (feedback) {
+      this.delivery.publishToHosts(evt.meetingId, feedback);
+    }
+  }
+
+  @OnEvent('text.analysis', { async: true })
+  handleTextAnalysis(evt: TextAnalysisResult): void {
+    const key = this.key(evt.meetingId, evt.participantId);
+    let state = this.byKey.get(key);
+
+    if (!state) {
+      this.logger.warn(`No state found for ${key}, creating new state`);
+      state = this.initState();
+      this.byKey.set(key, state);
+    }
+
+    this.updateStateWithTextAnalysis(state, evt);
+
+    // Re-executar pipeline A2E2 com dados combinados
+    const now = evt.timestamp;
+    const ctx = this.createDetectionContext(evt.meetingId, evt.participantId, now);
+    const feedback = runA2E2Pipeline(state, ctx);
+
+    if (feedback) {
+      this.delivery.publishToHosts(evt.meetingId, feedback);
+    }
+  }
+
+  private updateStateWithTextAnalysis(
+    state: ParticipantState,
+    evt: TextAnalysisResult,
+  ): void {
+    state.textAnalysis = {
+      sentiment: evt.analysis.sentiment_score,
+      keywords: evt.analysis.keywords,
+      hasQuestion: evt.analysis.has_question,
+      lastUpdate: evt.timestamp,
+    };
+
+    this.logger.debug(
+      `Updated text analysis for ${evt.meetingId}/${evt.participantId}`,
+      {
+        sentiment: evt.analysis.sentiment_score,
+        keywords: evt.analysis.keywords.slice(0, 5),
+      },
+    );
+  }
+
+  private createDetectionContext(
+    meetingId: string,
+    participantId: string,
+    now: number,
+  ): DetectionContext {
+    return {
+      meetingId,
       participantId,
-      now: evt.ts,
+      now,
       getParticipantName: (mid: string, pid: string) => this.index.getParticipantName(mid, pid),
       getParticipantRole: (mid: string, pid: string) => this.index.getParticipantRole(mid, pid),
       inCooldown: (st: ParticipantState, type: string, n: number) => this.inCooldown(st, type, n),
@@ -308,12 +378,6 @@ export class FeedbackAggregatorService {
         this.lastOverlapSampleAtByMeeting.set(mid, timestamp);
       },
     };
-
-    // Executar pipeline A2E2
-    const feedback = runA2E2Pipeline(state, ctx);
-    if (feedback) {
-      this.delivery.publishToHosts(evt.meetingId, feedback);
-    }
   }
 
   // ===================================================================

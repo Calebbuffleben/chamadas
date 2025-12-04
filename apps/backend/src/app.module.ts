@@ -7,6 +7,7 @@ import { AppController } from './app.controller';
 import { SessionsModule } from './sessions/sessions.module';
 import { LiveKitWebhookModule } from './livekit/livekit-webhook.module';
 import { AudioPipelineModule } from './pipeline/audio-pipeline.module';
+import { TextAnalysisModule } from './pipeline/text-analysis.module';
 import { FeedbackModule } from './feedback/feedback.module';
 
 @Module({
@@ -17,6 +18,7 @@ import { FeedbackModule } from './feedback/feedback.module';
     SessionsModule,
     LiveKitWebhookModule,
     AudioPipelineModule,
+    TextAnalysisModule,
     WebSocketModule,
     FeedbackModule,
   ],

@@ -2,8 +2,10 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { setupAudioEgressWsServer, setupVideoEgressWsServer } from './egress/media-egress.server';
+import { setupTranscriptionEgressWsServer } from './egress/transcription-egress.server';
 import { PrismaService } from './prisma/prisma.service';
 import { AudioPipelineService } from './pipeline/audio-pipeline.service';
+import { TextAnalysisService } from './pipeline/text-analysis.service';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { Request, Response, NextFunction } from 'express';
@@ -76,6 +78,7 @@ async function bootstrap() {
   const httpServer = app.getHttpServer();
   const prisma = app.get(PrismaService);
   const audioPipeline = app.get(AudioPipelineService);
+  const textAnalysisService = app.get(TextAnalysisService);
   setupAudioEgressWsServer(
     httpServer,
     {
@@ -92,6 +95,13 @@ async function bootstrap() {
       outputDir: process.env.EGRESS_VIDEO_OUTPUT_DIR,
     },
     prisma,
+  );
+  setupTranscriptionEgressWsServer(
+    httpServer,
+    {
+      path: '/egress-transcription',
+    },
+    textAnalysisService,
   );
 
   const port = process.env.PORT || 3001;

@@ -33,3 +33,9 @@ HUME_API_KEY=
 # Node Environment
 NODE_ENV=development
 
+# Text Analysis Service
+# Como o backend não está em Docker, usa localhost com a porta mapeada
+TEXT_ANALYSIS_SERVICE_URL=http://localhost:8001
+TEXT_ANALYSIS_ENABLED=true
+TEXT_ANALYSIS_TIMEOUT_MS=5000
+

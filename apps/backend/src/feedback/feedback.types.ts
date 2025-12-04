@@ -79,3 +79,25 @@ export interface FeedbackEventPayload {
     arousalEMA?: number;
   };
 }
+
+export interface TextAnalysisEvent {
+  meetingId: string;
+  participantId: string;
+  text: string;
+  analysis: {
+    word_count: number;
+    char_count: number;
+    has_question: boolean;
+    has_exclamation: boolean;
+    sentiment_score: {
+      positive: number;
+      negative: number;
+      neutral: number;
+    };
+    emotions: Record<string, number>;
+    topics: string[];
+    keywords: string[];
+  };
+  timestamp: number;
+  confidence: number;
+}

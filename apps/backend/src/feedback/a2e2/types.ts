@@ -29,6 +29,17 @@ export type ParticipantState = {
   };
   cooldownUntilByType: Map<string, number>;
   lastFeedbackAt?: number;
+  // NOVO: Dados de análise de texto
+  textAnalysis?: {
+    sentiment: {
+      positive: number;
+      negative: number;
+      neutral: number;
+    };
+    keywords: string[];
+    hasQuestion: boolean;
+    lastUpdate?: number;
+  };
 };
 
 /**
