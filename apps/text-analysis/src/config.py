@@ -34,6 +34,12 @@ class Config:
     ANALYSIS_MAX_LENGTH: int = int(os.getenv('ANALYSIS_MAX_LENGTH', '512'))
     ANALYSIS_BATCH_SIZE: int = int(os.getenv('ANALYSIS_BATCH_SIZE', '1'))
     
+    # Whisper Configuration (para transcrição de áudio)
+    WHISPER_MODEL_NAME: str = os.getenv('WHISPER_MODEL_NAME', 'base')
+    WHISPER_DEVICE: str = os.getenv('WHISPER_DEVICE', 'cpu')
+    WHISPER_LANGUAGE: str = os.getenv('WHISPER_LANGUAGE', 'pt')
+    WHISPER_TASK: str = os.getenv('WHISPER_TASK', 'transcribe')
+    
     @classmethod
     def validate(cls):
         """Valida configurações críticas"""

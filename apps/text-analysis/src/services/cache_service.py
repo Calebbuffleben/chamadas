@@ -35,7 +35,7 @@ class AnalysisCache:
         self.max_size = max_size
         
         logger.info(
-            "AnalysisCache initialized",
+            "✅ [CACHE] AnalysisCache inicializado",
             ttl_seconds=ttl_seconds,
             max_size=max_size
         )

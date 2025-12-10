@@ -12,10 +12,41 @@ from .socketio_server import app as socketio_app
 from .services.analysis_service import TextAnalysisService
 from .types.messages import TranscriptionChunk
 
-# Configurar structlog
+# Configurar structlog para exibir logs no console do Docker
+# Usar ConsoleRenderer para logs legíveis no console
+# Se LOG_FORMAT=json, usar JSONRenderer (útil para produção/agregação)
+import os
+
+log_format = os.getenv('LOG_FORMAT', 'console').lower()
+
+if log_format == 'json':
+    # Formato JSON (útil para produção, logs agregados)
+    renderer = structlog.processors.JSONRenderer()
+else:
+    # Formato console legível (padrão para desenvolvimento/Docker)
+    # Usar KeyValueRenderer que é mais compatível e funciona bem no Docker
+    try:
+        # Tentar usar ConsoleRenderer se disponível (structlog >= 22.0)
+        renderer = structlog.dev.ConsoleRenderer(
+            colors=False,  # Desabilitar cores no Docker
+            exception_formatter=structlog.dev.plain_traceback
+        )
+    except (AttributeError, ImportError):
+        # Fallback para KeyValueRenderer (mais compatível)
+        renderer = structlog.processors.KeyValueRenderer(
+            key_order=['timestamp', 'level', 'event', 'logger'],
+            drop_missing=True
+        )
+
+# DIAGNÓSTICO: Configurar nível de log baseado em LOG_LEVEL
+import logging
+log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+logging.basicConfig(level=log_level)
+
 structlog.configure(
     processors=[
-        structlog.stdlib.filter_by_level,
+        structlog.stdlib.filter_by_level,  # Este processor filtra por nível
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
@@ -23,7 +54,7 @@ structlog.configure(
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
+        renderer
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),
@@ -31,7 +62,17 @@ structlog.configure(
     cache_logger_on_first_use=True,
 )
 
+# DIAGNÓSTICO: Log de configuração
+print(f"[DIAGNÓSTICO] Structlog configurado - LOG_LEVEL={log_level_str}, log_level={log_level}")
+
 logger = structlog.get_logger()
+
+# Log de inicialização do structlog
+logger.info(
+    "✅ [SISTEMA] Structlog configurado",
+    log_format=log_format,
+    log_level=os.getenv('LOG_LEVEL', 'INFO')
+)
 
 # Criar app FastAPI
 fastapi_app = FastAPI(
@@ -41,7 +82,9 @@ fastapi_app = FastAPI(
 )
 
 # Instanciar serviço de análise
+logger.info("🔄 [SISTEMA] Criando instâncias de serviços...")
 analysis_service = TextAnalysisService()
+logger.info("✅ [SISTEMA] Serviços criados com sucesso")
 
 
 @fastapi_app.get("/health")
@@ -153,25 +196,38 @@ async def clear_cache():
 
 
 # Montar Socket.IO app no FastAPI
+logger.info("🔌 [SISTEMA] Montando Socket.IO no FastAPI...")
 fastapi_app.mount("/socket.io/", socketio_app)
+logger.info("✅ [SISTEMA] Socket.IO montado com sucesso")
 
 if __name__ == "__main__":
     # Validar configurações
     Config.validate()
     
     logger.info(
-        "Starting Text Analysis Service",
+        "🚀 [INICIALIZAÇÃO] Iniciando Text Analysis Service",
         host=Config.HOST,
         port=Config.PORT,
         model=Config.MODEL_NAME,
-        device=Config.MODEL_DEVICE
+        sbert_model=Config.SBERT_MODEL_NAME,
+        whisper_model=Config.WHISPER_MODEL_NAME,
+        device=Config.MODEL_DEVICE,
+        cache_ttl=Config.CACHE_TTL_SECONDS,
+        cache_max_size=Config.CACHE_MAX_SIZE
     )
+    
+    # Configurar logging do uvicorn para não interferir com structlog
+    import logging
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.setLevel(logging.WARNING)  # Reduzir logs do uvicorn
     
     uvicorn.run(
         fastapi_app,
         host=Config.HOST,
         port=Config.PORT,
         log_level=Config.LOG_LEVEL.lower(),
-        access_log=False  # Usar structlog ao invés
+        access_log=False,  # Usar structlog ao invés
+        use_colors=False,  # Desabilitar cores no Docker
+        log_config=None  # Não usar configuração padrão do uvicorn
     )
 

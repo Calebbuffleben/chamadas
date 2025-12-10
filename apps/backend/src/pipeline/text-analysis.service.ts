@@ -16,18 +16,18 @@ export interface TextAnalysisResult {
   participantId: string;
   text: string;
   analysis: {
-    word_count: number;
-    char_count: number;
-    has_question: boolean;
-    has_exclamation: boolean;
-    sentiment_score: {
-      positive: number;
-      negative: number;
-      neutral: number;
-    };
-    emotions: Record<string, number>;
-    topics: string[];
+    intent: string;
+    intent_confidence: number;
+    topic: string;
+    topic_confidence: number;
+    speech_act: string;
+    speech_act_confidence: number;
     keywords: string[];
+    entities: string[];
+    sentiment: string;
+    sentiment_score: number;
+    urgency: number;
+    embedding: number[];
   };
   timestamp: number;
   confidence: number;
@@ -126,6 +126,59 @@ export class TextAnalysisService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error(
         `Failed to send transcription: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async sendAudioChunk(
+    meetingId: string,
+    participantId: string,
+    track: string,
+    wavData: Buffer,
+    sampleRate: number,
+    channels: number,
+    timestamp?: number,
+    language?: string,
+  ): Promise<void> {
+    /**
+     * Envia chunk de áudio WAV para transcrição no serviço Python.
+     * 
+     * O áudio será transcrito usando Whisper e depois analisado com BERT.
+     * 
+     * @param meetingId - ID da reunião
+     * @param participantId - ID do participante
+     * @param track - ID da track de áudio
+     * @param wavData - Dados WAV (incluindo header)
+     * @param sampleRate - Taxa de amostragem (Hz)
+     * @param channels - Número de canais (1 = mono, 2 = estéreo)
+     * @param timestamp - Timestamp opcional
+     * @param language - Idioma opcional ('pt' para português)
+     */
+    if (!this.socket?.connected) {
+      this.logger.warn('Python service not connected, skipping audio transcription');
+      return;
+    }
+
+    try {
+      // Converter Buffer para base64 para envio via Socket.IO
+      const audioBase64 = wavData.toString('base64');
+
+      this.socket.emit('audio_chunk', {
+        meetingId,
+        participantId,
+        track,
+        audioData: audioBase64,
+        sampleRate,
+        channels,
+        timestamp: timestamp ?? Date.now(),
+        language: language ?? 'pt',
+      });
+      this.logger.debug(
+        `Sent audio chunk to Python for transcription: ${meetingId}/${participantId}/${track} (${wavData.length} bytes)`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to send audio chunk: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { HumeStreamService } from './hume-stream.service';
+import { TextAnalysisService } from './text-analysis.service';
 
 export type AudioChunkMeta = {
   meetingId: string;
@@ -27,11 +28,20 @@ export class AudioPipelineService {
   private readonly humeTargetSampleRate: number;
   private readonly humeTargetChannels: number = 1;
 
-  constructor(private readonly hume: HumeStreamService) {
+  constructor(
+    private readonly hume: HumeStreamService,
+    @Optional() private readonly textAnalysis?: TextAnalysisService,
+  ) {
     const seconds = Number(process.env.AUDIO_PIPELINE_GROUP_SECONDS || '2');
     this.defaultGroupSeconds = Number.isFinite(seconds) && seconds > 0 ? seconds : 2;
     const targetSr = Number(process.env.HUME_TARGET_SAMPLE_RATE || '16000');
     this.humeTargetSampleRate = Number.isFinite(targetSr) && targetSr > 0 ? targetSr : 16000;
+    
+    // Verificar se transcrição de áudio está habilitada
+    const transcriptionEnabled = (process.env.AUDIO_TRANSCRIPTION_ENABLED || 'true') === 'true';
+    if (transcriptionEnabled && this.textAnalysis) {
+      this.logger.log('Audio transcription enabled - audio will be sent for transcription');
+    }
   }
 
   enqueueChunk(meta: AudioChunkMeta, data: Buffer): void {
@@ -131,6 +141,28 @@ export class AudioPipelineService {
       },
       wavBody,
     );
+    
+    // Enviar áudio para transcrição (se habilitado)
+    const transcriptionEnabled = (process.env.AUDIO_TRANSCRIPTION_ENABLED || 'true') === 'true';
+    if (transcriptionEnabled && this.textAnalysis?.isConnected()) {
+      // Enviar de forma assíncrona para não bloquear o fluxo principal
+      this.textAnalysis
+        .sendAudioChunk(
+          meta.meetingId,
+          meta.participant,
+          meta.track,
+          wavBody,
+          this.humeTargetSampleRate,
+          this.humeTargetChannels,
+          Date.now(),
+          'pt', // Português por padrão
+        )
+        .catch((err) => {
+          this.logger.warn(
+            `Failed to send audio for transcription: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }
   }
 
   // Imentiv HTTP removed. WS-based real-time streaming via Hume.

@@ -36,6 +36,18 @@ type ParticipantState = {
     keywords: string[];
     hasQuestion: boolean;
     lastUpdate?: number;
+    // Novos campos da análise
+    intent?: string;
+    intent_confidence?: number;
+    topic?: string;
+    topic_confidence?: number;
+    speech_act?: string;
+    speech_act_confidence?: number;
+    entities?: string[];
+    sentiment_label?: string; // 'positive' | 'negative' | 'neutral'
+    sentiment_score?: number; // Score único
+    urgency?: number;
+    embedding?: number[];
   };
 };
 
@@ -323,17 +335,43 @@ export class FeedbackAggregatorService {
     evt: TextAnalysisResult,
   ): void {
     state.textAnalysis = {
-      sentiment: evt.analysis.sentiment_score,
+      sentiment: {
+        positive: evt.analysis.sentiment === 'positive' ? evt.analysis.sentiment_score : 0,
+        negative: evt.analysis.sentiment === 'negative' ? evt.analysis.sentiment_score : 0,
+        neutral: evt.analysis.sentiment === 'neutral' ? evt.analysis.sentiment_score : 0,
+      },
       keywords: evt.analysis.keywords,
-      hasQuestion: evt.analysis.has_question,
+      hasQuestion: evt.analysis.speech_act === 'question',
       lastUpdate: evt.timestamp,
+      // Novos campos
+      intent: evt.analysis.intent,
+      intent_confidence: evt.analysis.intent_confidence,
+      topic: evt.analysis.topic,
+      topic_confidence: evt.analysis.topic_confidence,
+      speech_act: evt.analysis.speech_act,
+      speech_act_confidence: evt.analysis.speech_act_confidence,
+      entities: evt.analysis.entities,
+      sentiment_label: evt.analysis.sentiment,
+      sentiment_score: evt.analysis.sentiment_score,
+      urgency: evt.analysis.urgency,
+      embedding: evt.analysis.embedding,
     };
 
     this.logger.debug(
       `Updated text analysis for ${evt.meetingId}/${evt.participantId}`,
       {
-        sentiment: evt.analysis.sentiment_score,
+        intent: evt.analysis.intent,
+        intent_confidence: evt.analysis.intent_confidence,
+        topic: evt.analysis.topic,
+        topic_confidence: evt.analysis.topic_confidence,
+        speech_act: evt.analysis.speech_act,
+        speech_act_confidence: evt.analysis.speech_act_confidence,
+        sentiment: evt.analysis.sentiment,
+        sentiment_score: evt.analysis.sentiment_score,
+        urgency: evt.analysis.urgency,
+        entities: evt.analysis.entities,
         keywords: evt.analysis.keywords.slice(0, 5),
+        embedding_dim: evt.analysis.embedding.length,
       },
     );
   }
@@ -394,6 +432,7 @@ export class FeedbackAggregatorService {
    * @deprecated Substituído pela pipeline A2E2 em ./a2e2/primary/
    * Detecta emoções primárias diretamente fornecidas pela Hume API.
    * Esta é a camada de maior prioridade - sempre tem precedência sobre outras.
+   * //Remover
    */
   private detectPrimaryEmotions(
     meetingId: string,
@@ -428,6 +467,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectHostility(
     meetingId: string,
     participantId: string,
@@ -469,6 +509,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectFrustration(
     meetingId: string,
     participantId: string,
@@ -507,6 +548,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectBoredom(
     meetingId: string,
     participantId: string,
@@ -548,6 +590,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectConfusion(
     meetingId: string,
     participantId: string,
@@ -586,6 +629,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectPositiveEngagement(
     meetingId: string,
     participantId: string,
@@ -631,6 +675,7 @@ export class FeedbackAggregatorService {
   /**
    * Detecta estados emocionais complexos através de combinações lógicas
    * entre sinais primários. Só executa se Camada 1 não retornou feedback.
+   * //Remover
    */
   private detectMetaStates(
     meetingId: string,
@@ -653,6 +698,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectFrustrationTrend(
     meetingId: string,
     participantId: string,
@@ -739,6 +785,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectPostInterruption(meetingId: string, now: number): FeedbackEventPayload | null {
     const list = this.postInterruptionCandidatesByMeeting.get(meetingId);
     if (!list || list.length === 0) return null;
@@ -795,6 +842,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectPolarization(meetingId: string, now: number): FeedbackEventPayload | null {
     const participants = this.participantsForMeeting(meetingId);
     const t = THRESHOLDS.meta.polarization;
@@ -852,6 +900,7 @@ export class FeedbackAggregatorService {
    * Detecta sinais prosódicos baseados em métricas acústicas.
    * Só executa se Camadas 1 e 2 não retornaram feedback.
    * NÃO duplica emoções primárias (ex: excitement vs arousal alto).
+   * //Remover
    */
   private detectProsodicSignals(
     meetingId: string,
@@ -890,6 +939,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectVolume(
     meetingId: string,
     participantId: string,
@@ -969,6 +1019,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectMonotony(
     meetingId: string,
     participantId: string,
@@ -1020,6 +1071,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectRhythm(
     meetingId: string,
     participantId: string,
@@ -1136,6 +1188,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectArousal(
     meetingId: string,
     participantId: string,
@@ -1205,6 +1258,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectValence(
     meetingId: string,
     participantId: string,
@@ -1267,6 +1321,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectGroupEnergy(meetingId: string, now: number): FeedbackEventPayload | null {
     const participants = this.participantsForMeeting(meetingId);
     if (participants.length === 0) return null;
@@ -1322,6 +1377,7 @@ export class FeedbackAggregatorService {
   /**
    * Detecta padrões comportamentais de longo prazo.
    * Menor prioridade - só executa se camadas 1-3 não retornaram feedback.
+   * //Remover
    */
   private detectLongTermSignals(
     meetingId: string,
@@ -1344,6 +1400,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectSilence(
     meetingId: string,
     participantId: string,
@@ -1386,6 +1443,7 @@ export class FeedbackAggregatorService {
     };
   }
 
+  //Remover
   private detectOverlap(meetingId: string, participantId: string, now: number): FeedbackEventPayload | null {
     const participants = this.participantsForMeeting(meetingId);
     const t = THRESHOLDS.longTerm.overlap;
@@ -1426,6 +1484,7 @@ export class FeedbackAggregatorService {
     return null;
   }
 
+  //Remover
   private detectInterruptions(meetingId: string, participantId: string, now: number): FeedbackEventPayload | null {
     const participants = this.participantsForMeeting(meetingId);
     if (participants.length < 2) return null;

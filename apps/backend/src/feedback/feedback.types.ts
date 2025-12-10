@@ -85,18 +85,18 @@ export interface TextAnalysisEvent {
   participantId: string;
   text: string;
   analysis: {
-    word_count: number;
-    char_count: number;
-    has_question: boolean;
-    has_exclamation: boolean;
-    sentiment_score: {
-      positive: number;
-      negative: number;
-      neutral: number;
-    };
-    emotions: Record<string, number>;
-    topics: string[];
+    intent: string;
+    intent_confidence: number;
+    topic: string;
+    topic_confidence: number;
+    speech_act: string;
+    speech_act_confidence: number;
     keywords: string[];
+    entities: string[];
+    sentiment: string;
+    sentiment_score: number;
+    urgency: number;
+    embedding: number[];
   };
   timestamp: number;
   confidence: number;

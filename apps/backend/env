@@ -39,3 +39,7 @@ TEXT_ANALYSIS_SERVICE_URL=http://localhost:8001
 TEXT_ANALYSIS_ENABLED=true
 TEXT_ANALYSIS_TIMEOUT_MS=5000
 
+# Audio Transcription
+# Habilitar transcrição de áudio para texto (usa Whisper no serviço Python)
+AUDIO_TRANSCRIPTION_ENABLED=true
+

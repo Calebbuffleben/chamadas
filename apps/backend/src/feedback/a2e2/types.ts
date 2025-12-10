@@ -39,6 +39,18 @@ export type ParticipantState = {
     keywords: string[];
     hasQuestion: boolean;
     lastUpdate?: number;
+    // Novos campos da análise
+    intent?: string;
+    intent_confidence?: number;
+    topic?: string;
+    topic_confidence?: number;
+    speech_act?: string;
+    speech_act_confidence?: number;
+    entities?: string[];
+    sentiment_label?: string; // 'positive' | 'negative' | 'neutral'
+    sentiment_score?: number; // Score único
+    urgency?: number;
+    embedding?: number[];
   };
 };
 
