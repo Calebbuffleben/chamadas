@@ -4,27 +4,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    """Configurações do serviço"""
+    """
+    Configurações centralizadas do serviço de análise de texto.
+    Todas as configurações são carregadas de variáveis de ambiente
+    com valores padrão sensatos.
+    """
     
-    # Server
-    PORT = int(os.getenv('PORT', '8000'))
-    HOST = os.getenv('HOST', '0.0.0.0')
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+    # Server Configuration
+    PORT: int = int(os.getenv('PORT', '8000'))
+    HOST: str = os.getenv('HOST', '0.0.0.0')
+    LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
     
-    # Socket.IO
-    SOCKETIO_CORS_ORIGINS = os.getenv('SOCKETIO_CORS_ORIGINS', '*').split(',')
+    # Socket.IO Configuration
+    SOCKETIO_CORS_ORIGINS: list = os.getenv('SOCKETIO_CORS_ORIGINS', '*').split(',')
     
-    # Analysis
-    ANALYSIS_TIMEOUT_MS = int(os.getenv('ANALYSIS_TIMEOUT_MS', '5000'))
+    # ML Model Configuration
+    MODEL_NAME: str = os.getenv('MODEL_NAME', 'neuralmind/bert-base-portuguese-cased')
+    MODEL_CACHE_DIR: str = os.getenv('MODEL_CACHE_DIR', '/app/models/.cache')
+    MODEL_DEVICE: str = os.getenv('MODEL_DEVICE', 'cpu')
     
-    # ML Models
-    MODEL_CACHE_DIR = os.getenv('MODEL_CACHE_DIR', '/app/models/.cache')
-    MODEL_DEVICE = os.getenv('MODEL_DEVICE', 'cpu')
-    SENTIMENT_MODEL = os.getenv('SENTIMENT_MODEL', 'neuralmind/bert-base-portuguese-cased')
-    EMOTION_MODEL = os.getenv('EMOTION_MODEL', 'cardiffnlp/twitter-roberta-base-emotion')
-    ENABLE_ML_ANALYSIS = os.getenv('ENABLE_ML_ANALYSIS', 'true').lower() == 'true'
+    # SBERT Configuration (para análise semântica)
+    SBERT_MODEL_NAME: str = os.getenv('SBERT_MODEL_NAME', 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
     
-    # Performance
-    ANALYSIS_BATCH_SIZE = int(os.getenv('ANALYSIS_BATCH_SIZE', '1'))
-    ANALYSIS_MAX_LENGTH = int(os.getenv('ANALYSIS_MAX_LENGTH', '512'))
+    # Cache Configuration
+    CACHE_TTL_SECONDS: int = int(os.getenv('CACHE_TTL_SECONDS', '300'))
+    CACHE_MAX_SIZE: int = int(os.getenv('CACHE_MAX_SIZE', '1000'))
+    
+    # Performance Configuration
+    ANALYSIS_MAX_LENGTH: int = int(os.getenv('ANALYSIS_MAX_LENGTH', '512'))
+    ANALYSIS_BATCH_SIZE: int = int(os.getenv('ANALYSIS_BATCH_SIZE', '1'))
+    
+    @classmethod
+    def validate(cls):
+        """Valida configurações críticas"""
+        assert cls.MODEL_NAME, "MODEL_NAME must be set"
+        assert cls.MODEL_CACHE_DIR, "MODEL_CACHE_DIR must be set"
+        assert cls.CACHE_TTL_SECONDS > 0, "CACHE_TTL_SECONDS must be positive"
+        assert cls.CACHE_MAX_SIZE > 0, "CACHE_MAX_SIZE must be positive"
 
